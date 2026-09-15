@@ -63,7 +63,7 @@ class ChunkReader:
                 self.vad = webrtcvad.Vad(vad_aggressiveness)
             except ImportError:
                 log.warning("webrtcvad not installed - streaming silence too "
-                            "(costs more). pip install webrtcvad")
+                            "(costs more). Run: uv sync")
 
     def _is_speech(self, pcm: bytes) -> bool:
         if self.vad is None:
