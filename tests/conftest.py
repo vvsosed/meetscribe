@@ -47,7 +47,10 @@ class FakeProcess:
 
     def terminate(self) -> None:
         self.terminated = True
-        self.returncode = 0
+        # A real SIGTERM exit is -15, not a clean 0. Recorder.failure() treats
+        # 0 as "no failure", so reporting 0 here would hide the path Task 11's
+        # shutdown guard actually depends on.
+        self.returncode = -15
 
     def stderr_text(self) -> str:
         return self._stderr

@@ -141,3 +141,32 @@ def test_recorder_reports_a_dead_process(fake_launcher):
     # A silently dead pw-record means the track goes quiet for the rest of the
     # meeting while we keep claiming to record.
     assert recorder.failure() == "no such target"
+
+
+def test_stop_terminates_a_running_process(fake_launcher):
+    recorder = Recorder(RecorderSpec(track="mic"), fake_launcher)
+    recorder.start()
+
+    recorder.stop()
+
+    assert fake_launcher.processes[0].terminated is True
+
+
+def test_stop_is_a_no_op_once_the_process_has_exited(fake_launcher):
+    recorder = Recorder(RecorderSpec(track="mic"), fake_launcher)
+    recorder.start()
+    fake_launcher.processes[0].die(returncode=1, stderr="gone")
+
+    recorder.stop()
+
+    # Already dead. Signalling again is pointless, and against a real process
+    # group it could reach a recycled pid.
+    assert fake_launcher.processes[0].terminated is False
+
+
+def test_stop_before_start_does_not_raise(fake_launcher):
+    recorder = Recorder(RecorderSpec(track="mic"), fake_launcher)
+
+    recorder.stop()
+
+    assert fake_launcher.processes == []
