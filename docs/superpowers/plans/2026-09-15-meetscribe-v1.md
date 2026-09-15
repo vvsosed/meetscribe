@@ -2631,6 +2631,33 @@ def test_pump_puts_timestamped_chunks(idle_graph):
     assert [c.track for c in chunks] == [MIC, MIC, MIC]
 
 
+def test_pump_timestamps_chunks_from_the_clock(idle_graph):
+    class TickingClock(FakeClock):
+        def monotonic(self) -> float:
+            self.now += 0.1
+            return self.now
+
+    launcher = FakeLauncher(script=b"\x01" * (BLOCK_BYTES * 3))
+    capture = PipeWireCapture(
+        config=CaptureConfig(system_enabled=False),
+        graph=FakeGraphSource(idle_graph),
+        launcher=launcher,
+        linker=None,
+        clock=TickingClock(),
+    )
+    recorder = capture.recorders[MIC]
+    recorder.start()
+    capture.pump(MIC, recorder)
+
+    stamps = [capture.queues[MIC].get(timeout=0).t_start for _ in range(3)]
+
+    # The field the sibling test is named for but never checks. Timestamps
+    # must advance, and must be relative to the capture's own origin.
+    assert stamps == sorted(stamps)
+    assert len(set(stamps)) == 3
+    assert stamps[0] >= 0.0
+
+
 def test_pump_marks_a_track_dead_when_pw_record_exits(idle_graph):
     launcher = FakeLauncher(script=b"")
     capture = PipeWireCapture(
@@ -2649,6 +2676,39 @@ def test_pump_marks_a_track_dead_when_pw_record_exits(idle_graph):
     # Silent death means the track goes quiet for the rest of the meeting.
     assert capture.dead_tracks == {MIC}
     assert capture.all_tracks_dead() is True
+
+
+def test_start_then_shutdown_leaves_no_thread_running(idle_graph):
+    launcher = FakeLauncher(script=b"\x01" * (BLOCK_BYTES * 2))
+    capture = PipeWireCapture(
+        config=CaptureConfig(system_enabled=False),
+        graph=FakeGraphSource(idle_graph),
+        launcher=launcher,
+        linker=None,
+        clock=FakeClock(),
+    )
+
+    capture.start()
+    assert len(capture._threads) == 1  # one pump, no tap without --app
+
+    capture.shutdown()
+
+    assert capture.stop.is_set()
+    assert all(not thread.is_alive() for thread in capture._threads)
+
+
+def test_shutdown_is_safe_to_call_twice(idle_graph):
+    capture = PipeWireCapture(
+        config=CaptureConfig(system_enabled=False),
+        graph=FakeGraphSource(idle_graph),
+        launcher=FakeLauncher(script=b""),
+        linker=None,
+        clock=FakeClock(),
+    )
+    capture.start()
+
+    capture.shutdown()
+    capture.shutdown()  # a second Ctrl-C must not raise
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -2669,6 +2729,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 
 from dataclasses import dataclass
 
@@ -2683,6 +2744,7 @@ log = logging.getLogger(__name__)
 QUEUE_BLOCKS = 400  # about 40 seconds of audio at 100 ms per block
 DROP_LOG_EVERY = 100
 NODE_APPEAR_TIMEOUT_S = 5.0
+SHUTDOWN_TIMEOUT_S = 2.0
 
 
 class CaptureError(RuntimeError):
@@ -2876,8 +2938,12 @@ class PipeWireCapture:
         self.stop.set()
         for recorder in self.recorders.values():
             recorder.stop()
+        # One shared budget rather than a fresh timeout per thread: joining
+        # three threads at 2 s each would stall Ctrl-C for six seconds. Real
+        # time, not the injected clock - these are real threads.
+        deadline = time.monotonic() + SHUTDOWN_TIMEOUT_S
         for thread in self._threads:
-            thread.join(timeout=2.0)
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
         for track, q in self.queues.items():
             if q.dropped:
                 log.warning("track %r dropped %d blocks in total", track, q.dropped)
@@ -2887,7 +2953,7 @@ class PipeWireCapture:
 
 Run: `uv run pytest tests/test_capture.py -v`
 
-Expected: PASS, 15 passed.
+Expected: PASS, 18 passed.
 
 - [ ] **Step 5: Commit**
 
