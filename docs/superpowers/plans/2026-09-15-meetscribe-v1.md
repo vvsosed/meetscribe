@@ -2462,6 +2462,9 @@ Deciding *what* to record from a graph snapshot is pure logic and gets tested pr
 Create `tests/test_capture.py`:
 
 ```python
+import io
+import threading
+
 import pytest
 
 from meetscribe.capture import (
@@ -2709,6 +2712,48 @@ def test_shutdown_is_safe_to_call_twice(idle_graph):
 
     capture.shutdown()
     capture.shutdown()  # a second Ctrl-C must not raise
+
+
+def test_shutdown_joins_a_pump_parked_on_read(idle_graph):
+    # A real pump spends almost all of a meeting blocked in read(), waiting
+    # for the next block. Terminating pw-record closes its stdout, which is
+    # what releases it. Without a join, shutdown() would return while that
+    # thread was still unwinding - and a test whose pump exits on its own
+    # cannot tell the difference.
+    released = threading.Event()
+
+    class ParkedStream(io.BytesIO):
+        def read(self, size=-1):  # type: ignore[override]
+            released.wait(timeout=5)
+            return b""
+
+    class ParkingLauncher(FakeLauncher):
+        def spawn(self, argv):
+            process = super().spawn(argv)
+            process._stdout = ParkedStream()
+            inner = process.terminate
+
+            def terminate():
+                inner()
+                released.set()
+
+            process.terminate = terminate  # type: ignore[method-assign]
+            return process
+
+    capture = PipeWireCapture(
+        config=CaptureConfig(system_enabled=False),
+        graph=FakeGraphSource(idle_graph),
+        launcher=ParkingLauncher(),
+        linker=None,
+        clock=FakeClock(),
+    )
+
+    capture.start()
+    assert capture._threads[0].is_alive(), "pump should be parked on read()"
+
+    capture.shutdown()
+
+    assert all(not thread.is_alive() for thread in capture._threads)
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -2953,7 +2998,7 @@ class PipeWireCapture:
 
 Run: `uv run pytest tests/test_capture.py -v`
 
-Expected: PASS, 18 passed.
+Expected: PASS, 19 passed.
 
 - [ ] **Step 5: Commit**
 
