@@ -62,3 +62,82 @@ def test_latency_is_configurable():
     )
 
     assert argv[argv.index("--latency") + 1] == "250ms"
+
+
+import io
+
+from meetscribe.recorder import Recorder, RecorderSpec, read_blocks
+from meetscribe.types import BLOCK_BYTES
+from tests.conftest import ChunkedBytesIO
+
+
+def test_reads_whole_blocks():
+    stream = io.BytesIO(b"\x01" * (BLOCK_BYTES * 3))
+
+    blocks = list(read_blocks(stream))
+
+    assert len(blocks) == 3
+    assert all(len(b) == BLOCK_BYTES for b in blocks)
+
+
+def test_reassembles_short_reads():
+    # A real pipe hands back 700 bytes when you ask for 3200.
+    stream = ChunkedBytesIO(b"\x01" * (BLOCK_BYTES * 2), max_read=700)
+
+    blocks = list(read_blocks(stream))
+
+    assert len(blocks) == 2
+    assert all(len(b) == BLOCK_BYTES for b in blocks)
+
+
+def test_drops_a_partial_trailing_block():
+    stream = io.BytesIO(b"\x01" * (BLOCK_BYTES + 100))
+
+    blocks = list(read_blocks(stream))
+
+    # Downstream code is entitled to assume every chunk is exactly one block.
+    assert len(blocks) == 1
+
+
+def test_empty_stream_yields_nothing():
+    assert list(read_blocks(io.BytesIO(b""))) == []
+
+
+def test_recorder_spawns_with_its_own_argv(fake_launcher):
+    recorder = Recorder(RecorderSpec(track="mic", target=1002), fake_launcher)
+
+    recorder.start()
+
+    assert len(fake_launcher.calls) == 1
+    argv = fake_launcher.calls[0]
+    assert argv[argv.index("--target") + 1] == "1002"
+    assert recorder.node_name in argv[argv.index("--properties") + 1]
+
+
+def test_recorder_node_names_are_unique():
+    a = Recorder(RecorderSpec(track="mic"), None)
+    b = Recorder(RecorderSpec(track="mic"), None)
+
+    assert a.node_name != b.node_name
+    assert a.node_name.startswith("meetscribe.mic.")
+
+
+def test_recorder_yields_blocks_from_the_process(fake_launcher):
+    fake_launcher.script = b"\x02" * (BLOCK_BYTES * 2)
+    recorder = Recorder(RecorderSpec(track="system"), fake_launcher)
+    recorder.start()
+
+    assert len(list(recorder.blocks())) == 2
+
+
+def test_recorder_reports_a_dead_process(fake_launcher):
+    recorder = Recorder(RecorderSpec(track="mic"), fake_launcher)
+    recorder.start()
+
+    assert recorder.failure() is None
+
+    fake_launcher.processes[0].die(returncode=1, stderr="no such target")
+
+    # A silently dead pw-record means the track goes quiet for the rest of the
+    # meeting while we keep claiming to record.
+    assert recorder.failure() == "no such target"
