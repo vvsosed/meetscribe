@@ -1066,7 +1066,10 @@ class FakeProcess:
 
     def terminate(self) -> None:
         self.terminated = True
-        self.returncode = 0
+        # A real SIGTERM exit is -15, not a clean 0. Recorder.failure() treats
+        # 0 as "no failure", so reporting 0 here would hide the path Task 11's
+        # shutdown guard actually depends on.
+        self.returncode = -15
 
     def stderr_text(self) -> str:
         return self._stderr
@@ -1634,6 +1637,35 @@ def test_recorder_reports_a_dead_process(fake_launcher):
     # A silently dead pw-record means the track goes quiet for the rest of the
     # meeting while we keep claiming to record.
     assert recorder.failure() == "no such target"
+
+
+def test_stop_terminates_a_running_process(fake_launcher):
+    recorder = Recorder(RecorderSpec(track="mic"), fake_launcher)
+    recorder.start()
+
+    recorder.stop()
+
+    assert fake_launcher.processes[0].terminated is True
+
+
+def test_stop_is_a_no_op_once_the_process_has_exited(fake_launcher):
+    recorder = Recorder(RecorderSpec(track="mic"), fake_launcher)
+    recorder.start()
+    fake_launcher.processes[0].die(returncode=1, stderr="gone")
+
+    recorder.stop()
+
+    # Already dead. Signalling again is pointless, and against a real process
+    # group it could reach a recycled pid.
+    assert fake_launcher.processes[0].terminated is False
+
+
+def test_stop_before_start_does_not_raise(fake_launcher):
+    recorder = Recorder(RecorderSpec(track="mic"), fake_launcher)
+
+    recorder.stop()
+
+    assert fake_launcher.processes == []
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -1726,7 +1758,7 @@ Move the `from __future__ import annotations` line and merge the imports so the 
 
 Run: `uv run pytest tests/test_recorder.py -v`
 
-Expected: PASS, 14 passed.
+Expected: PASS, 17 passed.
 
 - [ ] **Step 5: Commit**
 
@@ -2012,8 +2044,12 @@ Create `tests/test_adapters.py`:
 ```python
 import pytest
 
+import tempfile
+
 from meetscribe.adapters import (
+    STDERR_TAIL_BYTES,
     MissingToolError,
+    PopenProcess,
     SystemClock,
     classify_link_output,
     parse_pw_version,
@@ -2066,6 +2102,24 @@ def test_system_clock_satisfies_the_port():
     from meetscribe.ports import Clock
 
     assert isinstance(SystemClock(), Clock)
+
+
+def test_stderr_text_returns_the_tail_of_a_long_log():
+    # A temp file rather than a pipe, so pw-record can log all meeting without
+    # filling a 64 KB buffer and deadlocking. We keep the end of the log,
+    # which is where the failure is.
+    with tempfile.TemporaryFile() as handle:
+        handle.write(b"x" * STDERR_TAIL_BYTES)
+        handle.write(b"the actual error\n")
+
+        text = PopenProcess(process=None, stderr_file=handle).stderr_text()
+
+    assert "the actual error" in text
+    assert len(text) <= STDERR_TAIL_BYTES
+
+
+def test_stderr_text_is_empty_without_a_file():
+    assert PopenProcess(process=None).stderr_text() == ""
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -2092,8 +2146,9 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
-from typing import BinaryIO, Sequence
+from typing import IO, BinaryIO, Sequence
 
 from .graph import PwGraph, parse_graph
 from .ports import LinkResult
@@ -2106,6 +2161,7 @@ INSTALL_HINT = (
 )
 
 MIN_PW_VERSION = (0, 3, 60)
+STDERR_TAIL_BYTES = 8192
 
 
 class MissingToolError(RuntimeError):
@@ -2149,8 +2205,11 @@ class PwDumpGraphSource:
 
 
 class PopenProcess:
-    def __init__(self, process: subprocess.Popen):
+    def __init__(
+        self, process: subprocess.Popen, stderr_file: IO[bytes] | None = None
+    ):
         self._process = process
+        self._stderr_file = stderr_file
 
     @property
     def stdout(self) -> BinaryIO:
@@ -2171,22 +2230,33 @@ class PopenProcess:
             self._process.kill()
 
     def stderr_text(self) -> str:
-        if self._process.stderr is None:
+        """The tail of whatever the process wrote to stderr."""
+        if self._stderr_file is None:
             return ""
-        return (self._process.stderr.read() or b"").decode(errors="replace")
+        self._stderr_file.flush()
+        end = self._stderr_file.seek(0, os.SEEK_END)
+        self._stderr_file.seek(max(0, end - STDERR_TAIL_BYTES))
+        return self._stderr_file.read().decode(errors="replace")
 
 
 class SubprocessLauncher:
     def spawn(self, argv: Sequence[str]) -> PopenProcess:
         resolved = [require_tool(argv[0]), *argv[1:]]
+        # stderr goes to a temp file, never a pipe. Nothing reads a pipe until
+        # the process has already exited, so a chatty pw-record - an inherited
+        # PIPEWIRE_DEBUG is enough - fills the 64 KB buffer and blocks forever
+        # on write. That stalls stdout too, since it blocks in the same call
+        # stack, so capture goes silent with poll() still returning None and
+        # even the dead-track check never fires.
+        stderr_file = tempfile.TemporaryFile()
         process = subprocess.Popen(
             resolved,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=stderr_file,
             bufsize=0,
             start_new_session=True,
         )
-        return PopenProcess(process)
+        return PopenProcess(process, stderr_file)
 
 
 class PwLinkLinker:
@@ -2224,7 +2294,7 @@ def installed_pw_version() -> tuple[int, int, int]:
 
 Run: `uv run pytest tests/test_adapters.py -v`
 
-Expected: PASS, 8 passed.
+Expected: PASS, 10 passed.
 
 - [ ] **Step 5: Commit**
 
