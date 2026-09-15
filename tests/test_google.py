@@ -56,7 +56,10 @@ def test_maps_a_result_onto_the_session_timeline():
     assert seg.t_start == 301.0
     assert seg.t_end == 304.0
     assert [w.word for w in seg.words] == ["hello", "there"]
-    assert seg.words[0].start == 301.0
+    # Every boundary, not just the first: reading end_offset as start_offset
+    # would otherwise leave this test green.
+    assert (seg.words[0].start, seg.words[0].end) == (301.0, 302.0)
+    assert (seg.words[1].start, seg.words[1].end) == (302.0, 304.0)
 
 
 def test_interim_results_have_no_words():
@@ -65,7 +68,8 @@ def test_interim_results_have_no_words():
 
     assert seg.is_final is False
     assert seg.words == ()
-    assert seg.t_end == 2.0
+    # With no word timings an interim collapses to a point at its end offset.
+    assert seg.t_start == seg.t_end == 2.0
 
 
 def test_empty_transcripts_are_dropped():

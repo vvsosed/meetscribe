@@ -47,23 +47,27 @@ def segment_from_result(result, clock: StreamClock, track: str) -> Segment | Non
     if not text:
         return None
 
-    end = clock.absolute(duration_seconds(getattr(result, "result_end_offset", None)))
+    # Direct attribute access, not getattr with a default: on a real protobuf
+    # these fields are always present, so a default could only ever mask an
+    # upstream rename - turning a loud AttributeError into 0.0 timestamps
+    # written straight to the durable JSONL.
+    end = clock.absolute(duration_seconds(result.result_end_offset))
     words = tuple(
         Word(
             word=w.word,
             start=clock.absolute(duration_seconds(w.start_offset)),
             end=clock.absolute(duration_seconds(w.end_offset)),
         )
-        for w in (getattr(alternative, "words", None) or ())
+        for w in (alternative.words or ())
     )
 
     return Segment(
         track=track,
         text=text,
-        is_final=bool(getattr(result, "is_final", False)),
+        is_final=bool(result.is_final),
         t_start=words[0].start if words else end,
         t_end=end,
-        confidence=getattr(alternative, "confidence", None) or None,
+        confidence=alternative.confidence or None,
         words=words,
     )
 
