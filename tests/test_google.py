@@ -1,6 +1,7 @@
 from datetime import timedelta
 from types import SimpleNamespace
 
+import pytest
 from google.api_core import exceptions as gexc
 
 from meetscribe.google import (
@@ -343,6 +344,63 @@ def test_reports_audio_lost_while_offline(caplog):
 
     # An unmarked gap in a transcript reads as silence. Say how much went.
     assert any("3s of audio dropped" in r.getMessage() for r in caplog.records)
+
+
+def test_timestamps_survive_gated_silence():
+    # The defect this pins: the engine numbers results from the audio it
+    # received, the gate drops silence, so adding a real-time offset to an
+    # audio-relative position stamps the transcript early by however much was
+    # dropped. Every other test here gates nothing, so audio time and real
+    # time coincide and the bug is invisible.
+    quiet = b"\x00" * BLOCK_BYTES
+    stop = threading.Event()
+
+    audio: queue.Queue = queue.Queue()
+    moment = 0.0
+    audio.put(AudioChunk(track="mic", pcm=PCM, t_start=moment))
+    moment += 0.1
+    for _ in range(100):  # ten seconds of listening, almost all gated out
+        audio.put(AudioChunk(track="mic", pcm=quiet, t_start=moment))
+        moment += 0.1
+    spoken_at = moment
+    audio.put(AudioChunk(track="mic", pcm=PCM, t_start=spoken_at))
+
+    class GoogleLike:
+        """Numbers its result from the start of the audio it was handed."""
+
+        def __init__(self, timeline):
+            self._timeline = timeline
+
+        def stream(self, pcm):
+            sent = 0
+            for _ in pcm:
+                sent += 1
+                if sent == 7:  # one word, the five-block tail, the sentence
+                    stop.set()
+            result = SimpleNamespace(
+                alternatives=[
+                    SimpleNamespace(transcript="hello", confidence=0.9, words=[])
+                ],
+                is_final=True,
+                result_end_offset=timedelta(seconds=sent * 0.1),
+            )
+            segment = segment_from_result(result, self._timeline, "mic")
+            if segment is not None:
+                yield segment
+
+    out: queue.Queue = queue.Queue()
+    EngineWorker(
+        track="mic",
+        session_factory=lambda timeline: GoogleLike(timeline),
+        gate=SilenceGate(detector=lambda pcm: pcm != quiet),
+        clock=FakeClock(),
+        max_stream_s=10_000.0,
+    ).run(audio, out, stop)
+
+    segment = out.get_nowait()
+    # Without the timeline this is 0.7 - the audio position - rather than the
+    # real time ten seconds later when the sentence was actually spoken.
+    assert segment.t_end == pytest.approx(spoken_at + 0.1, abs=0.05)
 
 
 from meetscribe.google import (

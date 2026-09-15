@@ -1,4 +1,6 @@
-from meetscribe.rotation import MAX_STREAM_SECONDS, StreamClock
+import pytest
+
+from meetscribe.rotation import MAX_STREAM_SECONDS, AudioTimeline, StreamClock
 
 
 def test_rotation_threshold_stays_under_googles_five_minute_cap():
@@ -50,3 +52,33 @@ def test_rotation_preserves_the_configured_interval():
 
     assert rotated.max_stream_s == 1.0
     assert rotated.should_rotate(1.0) is True
+
+
+def test_timeline_maps_audio_position_back_to_real_time():
+    # Two blocks sent 10 seconds apart in real time are adjacent in the audio
+    # the engine receives, because the gate dropped everything between them.
+    timeline = AudioTimeline()
+    timeline.sent(0.0)
+    timeline.sent(10.0)
+
+    assert timeline.absolute(0.0) == 0.0
+    assert timeline.absolute(0.1) == pytest.approx(10.0)
+    assert timeline.absolute(0.15) == pytest.approx(10.05)
+
+
+def test_timeline_falls_back_to_the_offset_when_nothing_was_sent():
+    # A stream that failed on connect sent no audio, so there is nothing to
+    # map; behave like StreamClock rather than raising.
+    timeline = AudioTimeline(offset=300.0)
+
+    assert timeline.absolute(5.0) == 305.0
+
+
+def test_timeline_extrapolates_past_the_last_block_it_sent():
+    timeline = AudioTimeline()
+    timeline.sent(50.0)
+
+    # That block covers audio [0.0, 0.1) captured at 50.0, so position 0.25
+    # extrapolates 1:1 to 50.25 - not 50.15; there is no sound slope-1
+    # mapping that gives anything else.
+    assert timeline.absolute(0.25) == pytest.approx(50.25)

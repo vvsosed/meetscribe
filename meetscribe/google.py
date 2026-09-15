@@ -12,7 +12,7 @@ from typing import Callable, Iterator
 from google.api_core import exceptions as gexc
 
 from .ports import Clock, SpeechSession
-from .rotation import MAX_STREAM_SECONDS, StreamClock
+from .rotation import MAX_STREAM_SECONDS, AudioTimeline, StreamClock
 from .types import BLOCK_MS, TARGET_RATE, Segment, Word
 from .vad import SilenceGate
 
@@ -94,7 +94,7 @@ def next_backoff(previous: float) -> float:
     return min(previous * 2, BACKOFF_CAP_S)
 
 
-SessionFactory = Callable[[StreamClock], SpeechSession]
+SessionFactory = Callable[[AudioTimeline], SpeechSession]
 
 
 class EngineWorker:
@@ -136,6 +136,10 @@ class EngineWorker:
         while not stop.is_set():
             last_chunk_t = stream_clock.offset
             started = self._clock.monotonic()
+            # One timeline per stream: the engine numbers its results from the
+            # start of the audio we send it, and the gate means that is not
+            # elapsed time.
+            timeline = AudioTimeline(stream_clock.offset)
 
             def blocks() -> Iterator[bytes]:
                 nonlocal last_chunk_t
@@ -149,6 +153,7 @@ class EngineWorker:
                         continue
                     last_chunk_t = chunk.t_start
                     if self._gate.allows(chunk.pcm):
+                        timeline.sent(chunk.t_start)
                         yield chunk.pcm
 
             try:
@@ -157,7 +162,7 @@ class EngineWorker:
                 # breaking out here would discard finals the engine emitted
                 # on the way out - exactly the ones cli.py drains out_q for
                 # after Ctrl-C.
-                for segment in self._factory(stream_clock).stream(blocks()):
+                for segment in self._factory(timeline).stream(blocks()):
                     out_q.put(segment)
                 consecutive_failures = 0
                 backoff = BACKOFF_START_S
@@ -223,10 +228,10 @@ class GoogleConfig:
 class GoogleSpeechSession:
     """One StreamingRecognize call. Discarded and rebuilt on every rotation."""
 
-    def __init__(self, config: GoogleConfig, client, stream_clock: StreamClock, track: str):
+    def __init__(self, config: GoogleConfig, client, timeline: AudioTimeline, track: str):
         self._config = config
         self._client = client
-        self._clock = stream_clock
+        self._clock = timeline
         self._track = track
 
     def _config_request(self):
@@ -302,8 +307,8 @@ def build_session_factory(config: GoogleConfig, track: str) -> SessionFactory:
         client_options=ClientOptions(api_endpoint=speech_endpoint(config.region))
     )
 
-    def factory(stream_clock: StreamClock) -> SpeechSession:
-        return GoogleSpeechSession(config, client, stream_clock, track)
+    def factory(timeline: AudioTimeline) -> SpeechSession:
+        return GoogleSpeechSession(config, client, timeline, track)
 
     return factory
 
