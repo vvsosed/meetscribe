@@ -3387,8 +3387,10 @@ def test_rotates_and_carries_the_offset_forward():
     worker.run(filled_queue(6, start=100.0), queue.Queue(), stop)
 
     assert seen_offsets[0] == 0.0
-    # Second stream resumes from the last chunk seen, not from zero.
-    assert seen_offsets[1] > 0.0
+    # The exact value, not merely positive: 101.0 is the t_start of the last
+    # chunk the first stream consumed. Rotating to anything else would pass a
+    # "> 0.0" check while silently corrupting the timeline.
+    assert seen_offsets[1] == 101.0
 
 
 def test_fatal_errors_stop_the_run_immediately():
@@ -3453,8 +3455,39 @@ def test_repeated_failures_escalate_to_error_level(caplog):
     )
     worker.run(filled_queue(1), queue.Queue(), stop)
 
-    errors = [r for r in caplog.records if r.levelname == "ERROR"]
-    assert errors, "a dead network must not scroll past at warning level forever"
+    levels = [
+        record.levelname
+        for record in caplog.records
+        if "speech stream error" in record.getMessage()
+    ]
+    # Four warnings, then ERROR for every failure after - a dead network must
+    # not scroll past at warning level forever.
+    assert levels == ["WARNING"] * 4 + ["ERROR"] * 2
+
+
+def test_reports_audio_lost_while_offline(caplog):
+    stop = threading.Event()
+    attempts = []
+    audio: queue.Queue = queue.Queue()
+    audio.dropped = 0  # type: ignore[attr-defined]
+
+    def factory(clock_state):
+        attempts.append(1)
+        audio.dropped += 30  # the pump kept dropping while we were offline
+        if len(attempts) >= 2:
+            stop.set()
+        return ScriptedSession(clock_state, error=gexc.ServiceUnavailable("nope"))
+
+    worker = EngineWorker(
+        track="mic",
+        session_factory=factory,
+        gate=SilenceGate(detector=None),
+        clock=FakeClock(),
+    )
+    worker.run(audio, queue.Queue(), stop)
+
+    # An unmarked gap in a transcript reads as silence. Say how much went.
+    assert any("3s of audio dropped" in r.getMessage() for r in caplog.records)
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -3474,6 +3507,7 @@ from typing import Callable, Iterator
 
 from .ports import Clock, SpeechSession
 from .rotation import MAX_STREAM_SECONDS
+from .types import BLOCK_MS  # merges into the existing .types import
 from .vad import SilenceGate
 
 SessionFactory = Callable[[StreamClock], SpeechSession]
@@ -3481,6 +3515,14 @@ SessionFactory = Callable[[StreamClock], SpeechSession]
 
 class EngineWorker:
     """Drives one track's audio through rotating recognition streams."""
+
+    @staticmethod
+    def _dropped(audio_q) -> int:
+        """Blocks the queue has discarded, when it counts them.
+
+        A plain queue.Queue does not, so this reports 0 rather than failing.
+        """
+        return getattr(audio_q, "dropped", 0)
 
     def __init__(
         self,
@@ -3505,6 +3547,7 @@ class EngineWorker:
         stream_clock = StreamClock(max_stream_s=self._max_stream_s)
         backoff = BACKOFF_START_S
         consecutive_failures = 0
+        dropped_at_success = self._dropped(audio_q)
 
         while not stop.is_set():
             last_chunk_t = stream_clock.offset
@@ -3534,6 +3577,7 @@ class EngineWorker:
                     out_q.put(segment)
                 consecutive_failures = 0
                 backoff = BACKOFF_START_S
+                dropped_at_success = self._dropped(audio_q)
             except Exception as exc:
                 if stop.is_set():
                     break
@@ -3551,12 +3595,23 @@ class EngineWorker:
                     if consecutive_failures >= ESCALATE_AFTER_FAILURES
                     else logging.WARNING
                 )
+                # Say how much audio went while we were offline. Without
+                # this an outage leaves an unmarked hole in the transcript
+                # that reads exactly like nobody speaking.
+                lost_blocks = self._dropped(audio_q) - dropped_at_success
+                lost = (
+                    f"; {lost_blocks * BLOCK_MS / 1000:.0f}s of audio dropped "
+                    "while offline"
+                    if lost_blocks
+                    else ""
+                )
                 log.log(
                     level,
-                    "speech stream error (%s), retrying in %.0fs: %s",
+                    "speech stream error (%s), retrying in %.0fs: %s%s",
                     self._track,
                     backoff,
                     exc,
+                    lost,
                 )
                 self._clock.sleep(backoff)
                 backoff = next_backoff(backoff)
@@ -3570,7 +3625,7 @@ Merge the new imports into the module's existing import block.
 
 Run: `uv run pytest tests/test_google.py -v`
 
-Expected: PASS, 15 passed.
+Expected: PASS, 16 passed.
 
 - [ ] **Step 5: Commit**
 
