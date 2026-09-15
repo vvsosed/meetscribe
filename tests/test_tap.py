@@ -103,6 +103,50 @@ def test_records_which_applications_were_tapped(zoom_graph):
     assert tap.tapped_labels == {"ZOOM VoiceEngine"}
 
 
+def test_relinks_a_restarted_stream_whose_port_ids_were_recycled(zoom_graph):
+    # PipeWire hands a dead stream's port ids to a new one within a poll
+    # interval - verified against a live session. The old link died with the
+    # old node, so the new stream must be linked even though the ids match.
+    linker = FakeLinker()
+    restarted = replace(
+        zoom_graph,
+        nodes=tuple(
+            replace(n, serial=1900) if n.id == 55 else n for n in zoom_graph.nodes
+        ),
+    )
+    tap = make_tap(
+        with_capture_node(zoom_graph), with_capture_node(restarted), linker=linker
+    )
+
+    assert tap.poll_once() == 2
+    assert tap.poll_once() == 2
+    assert linker.links == [(60, 700), (61, 700), (60, 700), (61, 700)]
+
+
+def test_a_failed_link_is_retried_next_poll(zoom_graph):
+    # pw-link can lose a race with a stream still negotiating its format.
+    # That must not poison the pair for the rest of the session.
+    linker = FakeLinker(result=LinkResult.FAILED)
+    tap = make_tap(with_capture_node(zoom_graph), linker=linker)
+
+    assert tap.poll_once() == 0
+    assert tap.poll_once() == 0
+
+    assert len(linker.links) == 4
+
+
+def test_a_failed_link_warns_once_not_every_poll(zoom_graph, caplog):
+    linker = FakeLinker(result=LinkResult.FAILED)
+    tap = make_tap(with_capture_node(zoom_graph), linker=linker)
+
+    tap.poll_once()
+    tap.poll_once()
+    tap.poll_once()
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 2  # one per port, not one per poll
+
+
 def test_run_polls_on_the_interval_until_stopped(zoom_graph):
     stop = threading.Event()
     clock = FakeClock()

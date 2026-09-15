@@ -39,7 +39,8 @@ class AppTap:
         self._linker = linker
         self._clock = clock
         self._interval = interval
-        self._linked: set[tuple[int, int]] = set()
+        self._linked: set[tuple[int, str, str]] = set()
+        self._warned: set[tuple[int, str, str]] = set()
         self.tapped_labels: set[str] = set()
 
     def poll_once(self) -> int:
@@ -68,11 +69,35 @@ class AppTap:
             for index, out_port in enumerate(outputs):
                 # Fan every channel into our mono input; PipeWire sums them.
                 in_port = inputs[min(index, len(inputs) - 1)]
-                pair = (out_port.id, in_port.id)
+                # Keyed on the node's serial and the port NAMES, never on port
+                # ids: PipeWire recycles ids, and a restarted stream can be
+                # handed its dead predecessor's ids within one poll interval.
+                # Keying on ids would make us skip linking it and capture
+                # silence for the rest of the meeting.
+                pair = (source.serial, out_port.name, in_port.name)
                 if pair in self._linked:
                     continue
+
+                result = self._linker.link(out_port.id, in_port.id)
+                if result is LinkResult.FAILED:
+                    log.debug(
+                        "link %s:%s -> %s failed",
+                        source.label,
+                        out_port.name,
+                        in_port.name,
+                    )
+                    if pair not in self._warned:
+                        self._warned.add(pair)
+                        log.warning(
+                            "could not link %s (%s) into the capture node - "
+                            "audio from that application may be missing",
+                            source.label,
+                            out_port.name,
+                        )
+                    continue  # deliberately not recorded, so it is retried
+
                 self._linked.add(pair)
-                if self._linker.link(out_port.id, in_port.id) is LinkResult.LINKED:
+                if result is LinkResult.LINKED:
                     created += 1
         return created
 
