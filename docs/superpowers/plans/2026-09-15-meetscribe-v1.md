@@ -318,6 +318,17 @@ def test_rotation_never_moves_the_offset_backwards():
 
     # A late or duplicated chunk reporting an earlier time must not rewind us.
     assert clock.rotated(last_chunk_t=10.0).offset == 500.0
+
+
+def test_rotation_preserves_the_configured_interval():
+    # Losing max_stream_s here would silently reset the rotation interval to
+    # the 240 s default after the first rotation, with no other test noticing.
+    clock = StreamClock(max_stream_s=1.0)
+
+    rotated = clock.rotated(last_chunk_t=5.0)
+
+    assert rotated.max_stream_s == 1.0
+    assert rotated.should_rotate(1.0) is True
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -359,7 +370,13 @@ class StreamClock:
         return self.offset + stream_relative_s
 
     def rotated(self, last_chunk_t: float) -> StreamClock:
-        """Clock for the next stream. max() guards against rewinding."""
+        """Clock for the next stream. max() guards against rewinding.
+
+        `last_chunk_t` must already be on the session-absolute timeline — a
+        raw `AudioChunk.t_start`, not a time reported by the closing stream.
+        Do not pass it through `absolute()` first: that double-applies the
+        offset and compounds on every rotation.
+        """
         return replace(self, offset=max(self.offset, last_chunk_t))
 ```
 
@@ -367,7 +384,7 @@ class StreamClock:
 
 Run: `uv run pytest tests/test_rotation.py -v`
 
-Expected: PASS, 5 passed.
+Expected: PASS, 6 passed.
 
 - [ ] **Step 5: Commit**
 
