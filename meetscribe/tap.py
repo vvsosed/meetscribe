@@ -21,6 +21,7 @@ from .ports import Clock, GraphSource, Linker, LinkResult
 log = logging.getLogger(__name__)
 
 POLL_INTERVAL_S = 2.0
+GRAPH_ERROR_WARN_AFTER = 3
 
 
 class AppTap:
@@ -102,9 +103,23 @@ class AppTap:
         return created
 
     def run(self, stop: threading.Event) -> None:
+        consecutive_errors = 0
         while not stop.is_set():
             try:
                 self.poll_once()
+                consecutive_errors = 0
             except Exception as exc:  # a transient graph read must not kill us
-                log.debug("tap watcher: %s", exc)
+                consecutive_errors += 1
+                if consecutive_errors == GRAPH_ERROR_WARN_AFTER:
+                    # One blip is unremarkable. Failing repeatedly means we are
+                    # blind to new streams for the rest of the meeting, which
+                    # must not be debug-only. Warn once, not every poll.
+                    log.warning(
+                        "cannot read the PipeWire graph (%s) - no longer "
+                        "picking up new streams matching %r",
+                        exc,
+                        self._pattern,
+                    )
+                else:
+                    log.debug("tap watcher: %s", exc)
             self._clock.sleep(self._interval)

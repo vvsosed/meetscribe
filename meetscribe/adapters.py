@@ -27,6 +27,7 @@ INSTALL_HINT = (
 
 MIN_PW_VERSION = (0, 3, 60)
 STDERR_TAIL_BYTES = 8192
+LINK_TIMEOUT_S = 5
 
 
 class MissingToolError(RuntimeError):
@@ -98,6 +99,9 @@ class PopenProcess:
         """The tail of whatever the process wrote to stderr."""
         if self._stderr_file is None:
             return ""
+        # The child writes through an inherited fd, so its output is already
+        # on disk. This flush only matters when a caller wrote through this
+        # handle itself, as the tests do.
         self._stderr_file.flush()
         end = self._stderr_file.seek(0, os.SEEK_END)
         self._stderr_file.seek(max(0, end - STDERR_TAIL_BYTES))
@@ -126,11 +130,17 @@ class SubprocessLauncher:
 
 class PwLinkLinker:
     def link(self, src_port: int, dst_port: int) -> LinkResult:
-        result = subprocess.run(
-            [require_tool("pw-link"), str(src_port), str(dst_port)],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                [require_tool("pw-link"), str(src_port), str(dst_port)],
+                capture_output=True,
+                text=True,
+                timeout=LINK_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            # Called inside AppTap's poll loop; a hang here would stall the
+            # watcher for the rest of the meeting.
+            return LinkResult.FAILED
         return classify_link_output(result.returncode, result.stderr or "")
 
 
@@ -150,6 +160,6 @@ def installed_pw_version() -> tuple[int, int, int]:
             text=True,
             timeout=5,
         ).stdout
-    except (MissingToolError, subprocess.SubprocessError):
+    except (MissingToolError, subprocess.SubprocessError, OSError):
         return (0, 0, 0)
     return parse_pw_version(output)

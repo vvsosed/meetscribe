@@ -1,11 +1,13 @@
 import pytest
 
+import subprocess
 import tempfile
 
 from meetscribe.adapters import (
     STDERR_TAIL_BYTES,
     MissingToolError,
     PopenProcess,
+    PwLinkLinker,
     SystemClock,
     classify_link_output,
     parse_pw_version,
@@ -76,3 +78,16 @@ def test_stderr_text_returns_the_tail_of_a_long_log():
 
 def test_stderr_text_is_empty_without_a_file():
     assert PopenProcess(process=None).stderr_text() == ""
+
+
+def test_a_link_timeout_is_a_failure(monkeypatch):
+    # link() runs inside AppTap's poll loop, so a hang would stall the
+    # watcher for the rest of the meeting.
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+
+    def explode(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="pw-link", timeout=5)
+
+    monkeypatch.setattr("subprocess.run", explode)
+
+    assert PwLinkLinker().link(60, 700) is LinkResult.FAILED

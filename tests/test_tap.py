@@ -3,7 +3,7 @@ from dataclasses import replace
 
 from meetscribe.graph import PwGraph, PwNode, PwPort
 from meetscribe.ports import LinkResult
-from meetscribe.tap import POLL_INTERVAL_S, AppTap
+from meetscribe.tap import GRAPH_ERROR_WARN_AFTER, POLL_INTERVAL_S, AppTap
 from tests.conftest import FakeClock, FakeGraphSource, FakeLinker
 
 CAPTURE_NODE = "meetscribe.system.deadbeef"
@@ -172,3 +172,34 @@ def test_run_polls_on_the_interval_until_stopped(zoom_graph):
 
     assert clock.slept == [POLL_INTERVAL_S] * 3
     assert graph.calls == 3
+
+
+def test_repeated_graph_failures_escalate_to_a_warning(caplog):
+    class BrokenGraph:
+        def snapshot(self):
+            raise RuntimeError("pw-dump exploded")
+
+    stop = threading.Event()
+    clock = FakeClock()
+    tap = AppTap(
+        pattern="zoom",
+        capture_node_name=CAPTURE_NODE,
+        graph=BrokenGraph(),
+        linker=FakeLinker(),
+        clock=clock,
+    )
+    original_sleep = clock.sleep
+
+    def sleep_and_maybe_stop(seconds):
+        original_sleep(seconds)
+        if len(clock.slept) >= GRAPH_ERROR_WARN_AFTER + 3:
+            stop.set()
+
+    clock.sleep = sleep_and_maybe_stop  # type: ignore[method-assign]
+    tap.run(stop)
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    # Quiet for a blip, one warning once it is clearly persistent, and not
+    # one per poll after that.
+    assert len(warnings) == 1
+    assert "PipeWire graph" in warnings[0].getMessage()
