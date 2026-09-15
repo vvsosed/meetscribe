@@ -242,8 +242,10 @@ def test_rotates_and_carries_the_offset_forward():
     worker.run(filled_queue(6, start=100.0), queue.Queue(), stop)
 
     assert seen_offsets[0] == 0.0
-    # Second stream resumes from the last chunk seen, not from zero.
-    assert seen_offsets[1] > 0.0
+    # The exact value, not merely positive: 101.0 is the t_start of the last
+    # chunk the first stream consumed. Rotating to anything else would pass a
+    # "> 0.0" check while silently corrupting the timeline.
+    assert seen_offsets[1] == 101.0
 
 
 def test_fatal_errors_stop_the_run_immediately():
@@ -308,5 +310,36 @@ def test_repeated_failures_escalate_to_error_level(caplog):
     )
     worker.run(filled_queue(1), queue.Queue(), stop)
 
-    errors = [r for r in caplog.records if r.levelname == "ERROR"]
-    assert errors, "a dead network must not scroll past at warning level forever"
+    levels = [
+        record.levelname
+        for record in caplog.records
+        if "speech stream error" in record.getMessage()
+    ]
+    # Four warnings, then ERROR for every failure after - a dead network must
+    # not scroll past at warning level forever.
+    assert levels == ["WARNING"] * 4 + ["ERROR"] * 2
+
+
+def test_reports_audio_lost_while_offline(caplog):
+    stop = threading.Event()
+    attempts = []
+    audio: queue.Queue = queue.Queue()
+    audio.dropped = 0  # type: ignore[attr-defined]
+
+    def factory(clock_state):
+        attempts.append(1)
+        audio.dropped += 30  # the pump kept dropping while we were offline
+        if len(attempts) >= 2:
+            stop.set()
+        return ScriptedSession(clock_state, error=gexc.ServiceUnavailable("nope"))
+
+    worker = EngineWorker(
+        track="mic",
+        session_factory=factory,
+        gate=SilenceGate(detector=None),
+        clock=FakeClock(),
+    )
+    worker.run(audio, queue.Queue(), stop)
+
+    # An unmarked gap in a transcript reads as silence. Say how much went.
+    assert any("3s of audio dropped" in r.getMessage() for r in caplog.records)

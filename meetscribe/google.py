@@ -11,7 +11,7 @@ from google.api_core import exceptions as gexc
 
 from .ports import Clock, SpeechSession
 from .rotation import MAX_STREAM_SECONDS, StreamClock
-from .types import Segment, Word
+from .types import BLOCK_MS, Segment, Word
 from .vad import SilenceGate
 
 log = logging.getLogger(__name__)
@@ -105,6 +105,14 @@ class EngineWorker:
         self._clock = clock
         self._max_stream_s = max_stream_s
 
+    @staticmethod
+    def _dropped(audio_q) -> int:
+        """Blocks the queue has discarded, when it counts them.
+
+        A plain queue.Queue does not, so this reports 0 rather than failing.
+        """
+        return getattr(audio_q, "dropped", 0)
+
     def run(
         self,
         audio_q,
@@ -114,6 +122,7 @@ class EngineWorker:
         stream_clock = StreamClock(max_stream_s=self._max_stream_s)
         backoff = BACKOFF_START_S
         consecutive_failures = 0
+        dropped_at_success = self._dropped(audio_q)
 
         while not stop.is_set():
             last_chunk_t = stream_clock.offset
@@ -143,6 +152,7 @@ class EngineWorker:
                     out_q.put(segment)
                 consecutive_failures = 0
                 backoff = BACKOFF_START_S
+                dropped_at_success = self._dropped(audio_q)
             except Exception as exc:
                 if stop.is_set():
                     break
@@ -160,12 +170,20 @@ class EngineWorker:
                     if consecutive_failures >= ESCALATE_AFTER_FAILURES
                     else logging.WARNING
                 )
+                lost_blocks = self._dropped(audio_q) - dropped_at_success
+                lost = (
+                    f"; {lost_blocks * BLOCK_MS / 1000:.0f}s of audio dropped "
+                    "while offline"
+                    if lost_blocks
+                    else ""
+                )
                 log.log(
                     level,
-                    "speech stream error (%s), retrying in %.0fs: %s",
+                    "speech stream error (%s), retrying in %.0fs: %s%s",
                     self._track,
                     backoff,
                     exc,
+                    lost,
                 )
                 self._clock.sleep(backoff)
                 backoff = next_backoff(backoff)
