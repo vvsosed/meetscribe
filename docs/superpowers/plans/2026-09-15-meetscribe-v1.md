@@ -1789,7 +1789,7 @@ from dataclasses import replace
 
 from meetscribe.graph import PwGraph, PwNode, PwPort
 from meetscribe.ports import LinkResult
-from meetscribe.tap import POLL_INTERVAL_S, AppTap
+from meetscribe.tap import GRAPH_ERROR_WARN_AFTER, POLL_INTERVAL_S, AppTap
 from tests.conftest import FakeClock, FakeGraphSource, FakeLinker
 
 CAPTURE_NODE = "meetscribe.system.deadbeef"
@@ -1958,6 +1958,37 @@ def test_run_polls_on_the_interval_until_stopped(zoom_graph):
 
     assert clock.slept == [POLL_INTERVAL_S] * 3
     assert graph.calls == 3
+
+
+def test_repeated_graph_failures_escalate_to_a_warning(caplog):
+    class BrokenGraph:
+        def snapshot(self):
+            raise RuntimeError("pw-dump exploded")
+
+    stop = threading.Event()
+    clock = FakeClock()
+    tap = AppTap(
+        pattern="zoom",
+        capture_node_name=CAPTURE_NODE,
+        graph=BrokenGraph(),
+        linker=FakeLinker(),
+        clock=clock,
+    )
+    original_sleep = clock.sleep
+
+    def sleep_and_maybe_stop(seconds):
+        original_sleep(seconds)
+        if len(clock.slept) >= GRAPH_ERROR_WARN_AFTER + 3:
+            stop.set()
+
+    clock.sleep = sleep_and_maybe_stop  # type: ignore[method-assign]
+    tap.run(stop)
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    # Quiet for a blip, one warning once it is clearly persistent, and not
+    # one per poll after that.
+    assert len(warnings) == 1
+    assert "PipeWire graph" in warnings[0].getMessage()
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -1999,6 +2030,7 @@ from .ports import Clock, GraphSource, Linker, LinkResult
 log = logging.getLogger(__name__)
 
 POLL_INTERVAL_S = 2.0
+GRAPH_ERROR_WARN_AFTER = 3
 
 
 class AppTap:
@@ -2078,11 +2110,25 @@ class AppTap:
         return created
 
     def run(self, stop: threading.Event) -> None:
+        consecutive_errors = 0
         while not stop.is_set():
             try:
                 self.poll_once()
+                consecutive_errors = 0
             except Exception as exc:  # a transient graph read must not kill us
-                log.debug("tap watcher: %s", exc)
+                consecutive_errors += 1
+                if consecutive_errors == GRAPH_ERROR_WARN_AFTER:
+                    # One blip is unremarkable. Failing repeatedly means we are
+                    # blind to new streams for the rest of the meeting, which
+                    # must not be debug-only. Warn once, not every poll.
+                    log.warning(
+                        "cannot read the PipeWire graph (%s) - no longer "
+                        "picking up new streams matching %r",
+                        exc,
+                        self._pattern,
+                    )
+                else:
+                    log.debug("tap watcher: %s", exc)
             self._clock.sleep(self._interval)
 ```
 
@@ -2090,7 +2136,7 @@ class AppTap:
 
 Run: `uv run pytest tests/test_tap.py -v`
 
-Expected: PASS, 11 passed.
+Expected: PASS, 12 passed.
 
 - [ ] **Step 5: Commit**
 
@@ -2114,14 +2160,16 @@ The only module that shells out. Keep it thin — the decision logic it does own
 Create `tests/test_adapters.py`:
 
 ```python
-import pytest
-
+import subprocess
 import tempfile
+
+import pytest
 
 from meetscribe.adapters import (
     STDERR_TAIL_BYTES,
     MissingToolError,
     PopenProcess,
+    PwLinkLinker,
     SystemClock,
     classify_link_output,
     parse_pw_version,
@@ -2192,6 +2240,19 @@ def test_stderr_text_returns_the_tail_of_a_long_log():
 
 def test_stderr_text_is_empty_without_a_file():
     assert PopenProcess(process=None).stderr_text() == ""
+
+
+def test_a_link_timeout_is_a_failure(monkeypatch):
+    # link() runs inside AppTap's poll loop, so a hang would stall the
+    # watcher for the rest of the meeting.
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+
+    def explode(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="pw-link", timeout=5)
+
+    monkeypatch.setattr("subprocess.run", explode)
+
+    assert PwLinkLinker().link(60, 700) is LinkResult.FAILED
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -2234,6 +2295,7 @@ INSTALL_HINT = (
 
 MIN_PW_VERSION = (0, 3, 60)
 STDERR_TAIL_BYTES = 8192
+LINK_TIMEOUT_S = 5
 
 
 class MissingToolError(RuntimeError):
@@ -2305,6 +2367,9 @@ class PopenProcess:
         """The tail of whatever the process wrote to stderr."""
         if self._stderr_file is None:
             return ""
+        # The child writes through an inherited fd, so its output is already
+        # on disk. This flush only matters when a caller wrote through this
+        # handle itself, as the tests do.
         self._stderr_file.flush()
         end = self._stderr_file.seek(0, os.SEEK_END)
         self._stderr_file.seek(max(0, end - STDERR_TAIL_BYTES))
@@ -2333,11 +2398,17 @@ class SubprocessLauncher:
 
 class PwLinkLinker:
     def link(self, src_port: int, dst_port: int) -> LinkResult:
-        result = subprocess.run(
-            [require_tool("pw-link"), str(src_port), str(dst_port)],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                [require_tool("pw-link"), str(src_port), str(dst_port)],
+                capture_output=True,
+                text=True,
+                timeout=LINK_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            # Called inside AppTap's poll loop; a hang here would stall the
+            # watcher for the rest of the meeting.
+            return LinkResult.FAILED
         return classify_link_output(result.returncode, result.stderr or "")
 
 
@@ -2357,7 +2428,9 @@ def installed_pw_version() -> tuple[int, int, int]:
             text=True,
             timeout=5,
         ).stdout
-    except (MissingToolError, subprocess.SubprocessError):
+    except (MissingToolError, subprocess.SubprocessError, OSError):
+        # OSError covers a tool deleted between which() and exec. This exists
+        # only to drive a soft warning, so it must never throw harder.
         return (0, 0, 0)
     return parse_pw_version(output)
 ```
@@ -2366,7 +2439,7 @@ def installed_pw_version() -> tuple[int, int, int]:
 
 Run: `uv run pytest tests/test_adapters.py -v`
 
-Expected: PASS, 10 passed.
+Expected: PASS, 11 passed.
 
 - [ ] **Step 5: Commit**
 
