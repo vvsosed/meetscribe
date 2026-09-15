@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -67,3 +68,36 @@ def test_ports_are_filtered_by_node_and_direction(zoom):
 def test_matching_is_case_insensitive(zoom):
     assert zoom.find("ZOOM", PLAYBACK_STREAM) is not None
     assert zoom.find("Spotify", PLAYBACK_STREAM).app_binary == "spotify"
+
+
+def test_serial_falls_back_to_id_with_a_warning(caplog):
+    # Degrading is better than crashing, but it must not happen silently:
+    # a recycled id can point pw-record at the wrong stream mid-meeting.
+    dump = json.dumps(
+        [
+            {
+                "id": 77,
+                "type": "PipeWire:Interface:Node",
+                "info": {
+                    "props": {
+                        "media.class": "Audio/Sink",
+                        "node.name": "sink-without-serial",
+                    }
+                },
+            }
+        ]
+    )
+
+    graph = parse_graph(dump)
+
+    assert graph.node_by_name("sink-without-serial").serial == 77
+    assert "no object.serial" in caplog.text
+
+
+def test_empty_dump_yields_an_empty_graph():
+    graph = parse_graph("[]")
+
+    assert graph.nodes == ()
+    assert graph.ports == ()
+    assert graph.default_sink is None
+    assert graph.default_source is None

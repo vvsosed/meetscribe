@@ -8,12 +8,15 @@ fixture with no PipeWire session.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 
 # media.class values, per pipewire-props(7)
 SINK = "Audio/Sink"
 SOURCE = "Audio/Source"
 PLAYBACK_STREAM = "Stream/Output/Audio"  # an application producing sound
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -84,10 +87,20 @@ def parse_graph(dump_text: str) -> PwGraph:
             media_class = props.get("media.class")
             if not media_class:
                 continue  # links, filters and other plumbing we do not care about
+            serial = props.get("object.serial")
+            if serial is None:
+                serial = obj["id"]
+                log.warning(
+                    "node %r has no object.serial; falling back to id %s, which "
+                    "PipeWire recycles - a long capture targeting it may end up "
+                    "on the wrong stream",
+                    props.get("node.name", ""),
+                    serial,
+                )
             nodes.append(
                 PwNode(
                     id=obj["id"],
-                    serial=props.get("object.serial", obj["id"]),
+                    serial=serial,
                     name=props.get("node.name", ""),
                     description=props.get("node.description", ""),
                     media_class=media_class,
