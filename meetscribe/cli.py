@@ -126,6 +126,7 @@ def main(
     launcher: ProcessLauncher | None = None,
     linker: Linker | None = None,
     clock: Clock | None = None,
+    session_factory=None,
 ) -> int:
     args = build_parser().parse_args(argv)
 
@@ -144,7 +145,10 @@ def main(
         if args.cmd == "devices":
             print(describe_graph(graph.snapshot()))
             return 0
-        return _run(args, graph, launcher, linker, clock)
+        return _run(args, graph, launcher, linker, clock, session_factory)
+    except KeyboardInterrupt:
+        # Ctrl-C before the handler is installed, e.g. during auth.
+        return 130
     except json.JSONDecodeError as exc:
         # Not a RuntimeError, so the clause below would miss it and the user
         # would get a traceback instead of one clean line.
@@ -157,9 +161,18 @@ def main(
     except (CaptureError, MissingToolError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    except Exception as exc:
+        # Everything else the outside world throws: Google auth and gRPC, a
+        # dead pw-dump, a full disk. None of those subclass RuntimeError, so
+        # an allowlist misses exactly the failures a first run hits. -v
+        # re-raises so a real traceback is still one flag away.
+        if getattr(args, "verbose", False):
+            raise
+        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
 
 
-def _run(args, graph, launcher, linker, clock) -> int:
+def _run(args, graph, launcher, linker, clock, session_factory=None) -> int:
     if installed_pw_version() < MIN_PW_VERSION:
         log.warning(
             "PipeWire older than %s detected; target.object and "
@@ -193,13 +206,13 @@ def _run(args, graph, launcher, linker, clock) -> int:
 
     segments: queue.Queue = queue.Queue()
     stop = threading.Event()
-    writer = TranscriptWriter(args.out, show_interim=not args.no_interim)
+    make_session = session_factory or build_session_factory
 
     workers = [
         threading.Thread(
             target=EngineWorker(
                 track=track,
-                session_factory=build_session_factory(google_config, track),
+                session_factory=make_session(google_config, track),
                 # A fresh detector per track, deliberately: webrtcvad adapts
                 # to the noise floor across calls, so a shared instance would
                 # let one track's loudness skew the other's classification.
@@ -213,6 +226,10 @@ def _run(args, graph, launcher, linker, clock) -> int:
         for track in capture.queues
     ]
 
+    # Nothing touches the filesystem until the client above has been built,
+    # so an auth failure does not leave a stray transcripts/ directory behind.
+    writer = TranscriptWriter(args.out, show_interim=not args.no_interim)
+
     def handle_sigint(*_):
         stop.set()
         capture.stop.set()
@@ -224,7 +241,10 @@ def _run(args, graph, launcher, linker, clock) -> int:
         worker.start()
 
     where = f"app={args.app}" if args.app else "system audio"
-    print(f"\nRecording {where} via Chirp 3. This session is being recorded. Ctrl-C to stop.\n")
+    print(
+        f"\nRecording {where} via Chirp 3. This session is being recorded. Ctrl-C to stop.\n",
+        file=sys.stderr,
+    )
 
     try:
         while not stop.is_set():
@@ -246,6 +266,6 @@ def _run(args, graph, launcher, linker, clock) -> int:
             except queue.Empty:
                 break
         path = writer.close()
-        print(f"\nSaved:\n  {writer.jsonl_path}\n  {path}")
+        print(f"\nSaved:\n  {writer.jsonl_path}\n  {path}", file=sys.stderr)
 
     return 0

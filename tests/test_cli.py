@@ -100,3 +100,38 @@ def test_run_reports_a_missing_device_without_a_traceback(capsys, idle_graph):
 
     assert code == 1
     assert "meetscribe devices" in capsys.readouterr().err
+
+
+def test_run_drains_and_closes_the_writer_when_every_track_dies(tmp_path, idle_graph):
+    # pw-record fails at startup - a bad target, say - so the pump finds a
+    # dead process, capture marks the track dead, and the main loop's
+    # all_tracks_dead() check breaks out into the finally block. This is the
+    # only test that reaches past capture construction into worker startup
+    # and the shutdown sequence.
+    class DyingLauncher(FakeLauncher):
+        def spawn(self, argv):
+            process = super().spawn(argv)
+            process.die(returncode=1, stderr="no such target")
+            return process
+
+    class SilentSession:
+        def stream(self, pcm):
+            for _ in pcm:
+                pass
+            return iter(())
+
+    def fake_factory(config, track):
+        return lambda stream_clock: SilentSession()
+
+    code = main(
+        ["run", "--no-system", "--project", "p", "--out", str(tmp_path)],
+        graph=FakeGraphSource(idle_graph),
+        launcher=DyingLauncher(script=b""),
+        linker=FakeLinker(),
+        clock=FakeClock(),
+        session_factory=fake_factory,
+    )
+
+    assert code == 0
+    assert list(tmp_path.glob("*.jsonl")), "writer should have created its record"
+    assert list(tmp_path.glob("*.md")), "close() should have rendered the markdown"
