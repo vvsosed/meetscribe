@@ -134,6 +134,11 @@ class EngineWorker:
                         yield chunk.pcm
 
             try:
+                # No stop check inside this loop. blocks() already returns
+                # when stop is set, which ends the stream on its own, and
+                # breaking out here would discard finals the engine emitted
+                # on the way out - exactly the ones cli.py drains out_q for
+                # after Ctrl-C.
                 for segment in self._factory(stream_clock).stream(blocks()):
                     out_q.put(segment)
                 consecutive_failures = 0
