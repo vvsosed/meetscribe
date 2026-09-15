@@ -69,7 +69,7 @@ meetscribe/
   tap.py           #  ~70   AppTap link watcher
   capture.py       #  ~90   composes recorder/tap, resolves targets, owns queues
   google.py        # ~130   Chirp 3 adapter
-  rotation.py      #  ~40   StreamClock — pure offset/rotation math
+  rotation.py      #  ~80   StreamClock and AudioTimeline — pure time math
   vad.py           #  ~50   silence gating
   transcript.py    # ~110   writer + Markdown rendering
 ```
@@ -142,6 +142,36 @@ class StreamClock:
     def rotated(self, last_chunk_t: float) -> StreamClock
 ```
 
+### Audio time is not elapsed time
+
+`StreamClock` alone is not enough, and the first version of this design got
+that wrong. The silence gate drops blocks before they are sent, so the
+engine's result offsets count **the audio it received**, not elapsed time.
+Adding a real-time offset to an audio-relative position stamps the transcript
+early by however much silence was dropped.
+
+`AudioTimeline` closes that gap. The worker records the capture time of every
+block it actually sends, and the mapping back is a lookup rather than an
+addition:
+
+```python
+class AudioTimeline:
+    offset: float                       # fallback when nothing was sent
+    def sent(self, real_t: float) -> None
+    def absolute(self, audio_seconds: float) -> float
+```
+
+It exposes the same `offset` and `absolute()` surface as `StreamClock`, so the
+session and `segment_from_result` are unchanged — the worker simply hands the
+timeline to the factory instead of the clock. One timeline per stream, one
+float per block sent, discarded at each rotation.
+
+Without it the error grows with gated silence inside each rotation window, and
+the two tracks gate different amounts — the microphone while you listen, the
+system track while you talk — so they drift apart from each other and the
+Markdown, which sorts by timestamp, interleaves You and Them wrongly. That
+ordering is the feature the two-track design exists to provide.
+
 Google closes any single `StreamingRecognize` call at 5 minutes. Rotating at
 240 s stays safely under it. The failure mode is silent timestamp drift across
 a long meeting, which live testing does not catch — hence a pure type that can
@@ -196,6 +226,7 @@ losing it is a red suite rather than a silent regression found mid-meeting.
 | App streams appear late (Zoom starts on meeting join), so the graph is re-scanned every 2 s | fake `GraphSource`: empty snapshot, then populated, link on second poll |
 | Links are additive and deduped | same snapshot twice yields one `link()` call; `ALREADY_LINKED` is not an error |
 | Google's 5-minute cap | `StreamClock` rotated three times; timestamps monotonic and gap-free |
+| Gated silence must not shift the timeline | a worker driven with a gating `SilenceGate` and an engine that numbers results from the audio it received |
 | VAD keeps a silence tail so finals land | speech then silence: exactly 5 silent blocks pass, then none |
 | JSONL survives an unclean exit | write finals, skip `close()`, assert the file is complete |
 | Pipe `read()` can return short | fake process emits short reads; chunks still exactly `BLOCK_BYTES` |

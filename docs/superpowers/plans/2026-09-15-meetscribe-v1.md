@@ -3552,6 +3552,10 @@ class EngineWorker:
         while not stop.is_set():
             last_chunk_t = stream_clock.offset
             started = self._clock.monotonic()
+            # One timeline per stream: the engine numbers its results from the
+            # start of the audio we send it, and the gate means that is not
+            # elapsed time.
+            timeline = AudioTimeline(stream_clock.offset)
 
             def blocks() -> Iterator[bytes]:
                 nonlocal last_chunk_t
@@ -3565,6 +3569,7 @@ class EngineWorker:
                         continue
                     last_chunk_t = chunk.t_start
                     if self._gate.allows(chunk.pcm):
+                        timeline.sent(chunk.t_start)
                         yield chunk.pcm
 
             try:
@@ -3573,7 +3578,7 @@ class EngineWorker:
                 # breaking out here would discard finals the engine emitted
                 # on the way out - exactly the ones cli.py drains out_q for
                 # after Ctrl-C.
-                for segment in self._factory(stream_clock).stream(blocks()):
+                for segment in self._factory(timeline).stream(blocks()):
                     out_q.put(segment)
                 consecutive_failures = 0
                 backoff = BACKOFF_START_S
