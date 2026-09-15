@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue as queue_module
 import threading
+from dataclasses import dataclass
 from typing import Callable, Iterator
 
 from google.api_core import exceptions as gexc
 
 from .ports import Clock, SpeechSession
 from .rotation import MAX_STREAM_SECONDS, StreamClock
-from .types import BLOCK_MS, Segment, Word
+from .types import BLOCK_MS, TARGET_RATE, Segment, Word
 from .vad import SilenceGate
 
 log = logging.getLogger(__name__)
@@ -189,3 +191,116 @@ class EngineWorker:
                 backoff = next_backoff(backoff)
 
             stream_clock = stream_clock.rotated(last_chunk_t)
+
+
+def speech_endpoint(region: str) -> str:
+    if region == "global":
+        return "speech.googleapis.com"
+    return f"{region}-speech.googleapis.com"
+
+
+def recognizer_path(project_id: str, region: str) -> str:
+    return f"projects/{project_id}/locations/{region}/recognizers/_"
+
+
+@dataclass(frozen=True)
+class GoogleConfig:
+    project_id: str
+    region: str = "eu"
+    model: str = "chirp_3"
+    language_codes: tuple[str, ...] = ("en-US",)
+    phrases: tuple[str, ...] = ()
+    interim: bool = True
+
+
+class GoogleSpeechSession:
+    """One StreamingRecognize call. Discarded and rebuilt on every rotation."""
+
+    def __init__(self, config: GoogleConfig, client, stream_clock: StreamClock, track: str):
+        self._config = config
+        self._client = client
+        self._clock = stream_clock
+        self._track = track
+
+    def _config_request(self):
+        from google.cloud.speech_v2.types import cloud_speech as cs
+
+        adaptation = None
+        if self._config.phrases:
+            adaptation = cs.SpeechAdaptation(
+                phrase_sets=[
+                    cs.SpeechAdaptation.AdaptationPhraseSet(
+                        inline_phrase_set=cs.PhraseSet(
+                            phrases=[
+                                cs.PhraseSet.Phrase(value=p, boost=15.0)
+                                for p in self._config.phrases
+                            ]
+                        )
+                    )
+                ]
+            )
+
+        recognition_config = cs.RecognitionConfig(
+            explicit_decoding_config=cs.ExplicitDecodingConfig(
+                encoding=cs.ExplicitDecodingConfig.AudioEncoding.LINEAR16,
+                sample_rate_hertz=TARGET_RATE,
+                audio_channel_count=1,
+            ),
+            language_codes=list(self._config.language_codes),
+            model=self._config.model,
+            features=cs.RecognitionFeatures(
+                enable_automatic_punctuation=True,
+                enable_word_time_offsets=True,
+            ),
+            **({"adaptation": adaptation} if adaptation else {}),
+        )
+
+        streaming_config = cs.StreamingRecognitionConfig(
+            config=recognition_config,
+            streaming_features=cs.StreamingRecognitionFeatures(
+                interim_results=self._config.interim,
+            ),
+        )
+        return cs.StreamingRecognizeRequest(
+            recognizer=recognizer_path(self._config.project_id, self._config.region),
+            streaming_config=streaming_config,
+        )
+
+    def stream(self, pcm: Iterator[bytes]) -> Iterator[Segment]:
+        from google.cloud.speech_v2.types import cloud_speech as cs
+
+        def requests():
+            yield self._config_request()
+            for block in pcm:
+                yield cs.StreamingRecognizeRequest(audio=block)
+
+        for response in self._client.streaming_recognize(requests=requests()):
+            for result in response.results:
+                segment = segment_from_result(result, self._clock, self._track)
+                if segment is not None:
+                    yield segment
+
+
+def build_session_factory(config: GoogleConfig, track: str) -> SessionFactory:
+    """Create the factory the EngineWorker calls on every rotation."""
+    from google.api_core.client_options import ClientOptions
+    from google.cloud.speech_v2 import SpeechClient
+
+    client = SpeechClient(
+        client_options=ClientOptions(api_endpoint=speech_endpoint(config.region))
+    )
+
+    def factory(stream_clock: StreamClock) -> SpeechSession:
+        return GoogleSpeechSession(config, client, stream_clock, track)
+
+    return factory
+
+
+def project_from_environment() -> str:
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if not project:
+        raise RuntimeError(
+            "No GCP project. Pass --project or set GOOGLE_CLOUD_PROJECT, and "
+            "point GOOGLE_APPLICATION_CREDENTIALS at a service account key."
+        )
+    return project

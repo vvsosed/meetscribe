@@ -343,3 +343,30 @@ def test_reports_audio_lost_while_offline(caplog):
 
     # An unmarked gap in a transcript reads as silence. Say how much went.
     assert any("3s of audio dropped" in r.getMessage() for r in caplog.records)
+
+
+from meetscribe.google import GoogleConfig, recognizer_path, speech_endpoint
+
+
+def test_regional_endpoint():
+    assert speech_endpoint("eu") == "eu-speech.googleapis.com"
+    assert speech_endpoint("us") == "us-speech.googleapis.com"
+
+
+def test_global_endpoint_has_no_prefix():
+    assert speech_endpoint("global") == "speech.googleapis.com"
+
+
+def test_recognizer_path_uses_the_implicit_recognizer():
+    path = recognizer_path("my-project", "eu")
+
+    assert path == "projects/my-project/locations/eu/recognizers/_"
+
+
+def test_config_defaults_match_the_spec():
+    config = GoogleConfig(project_id="p")
+
+    assert config.region == "eu"
+    assert config.model == "chirp_3"
+    assert config.language_codes == ("en-US",)
+    assert config.interim is True
