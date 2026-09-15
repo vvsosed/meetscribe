@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 
 from dataclasses import dataclass
 
@@ -19,6 +20,7 @@ log = logging.getLogger(__name__)
 QUEUE_BLOCKS = 400  # about 40 seconds of audio at 100 ms per block
 DROP_LOG_EVERY = 100
 NODE_APPEAR_TIMEOUT_S = 5.0
+SHUTDOWN_TIMEOUT_S = 2.0
 
 
 class CaptureError(RuntimeError):
@@ -212,8 +214,12 @@ class PipeWireCapture:
         self.stop.set()
         for recorder in self.recorders.values():
             recorder.stop()
+        # One shared budget rather than a fresh timeout per thread: joining
+        # three threads at 2 s each would stall Ctrl-C for six seconds. Real
+        # time, not the injected clock - these are real threads.
+        deadline = time.monotonic() + SHUTDOWN_TIMEOUT_S
         for thread in self._threads:
-            thread.join(timeout=2.0)
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
         for track, q in self.queues.items():
             if q.dropped:
                 log.warning("track %r dropped %d blocks in total", track, q.dropped)

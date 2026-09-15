@@ -167,6 +167,33 @@ def test_pump_puts_timestamped_chunks(idle_graph):
     assert [c.track for c in chunks] == [MIC, MIC, MIC]
 
 
+def test_pump_timestamps_chunks_from_the_clock(idle_graph):
+    class TickingClock(FakeClock):
+        def monotonic(self) -> float:
+            self.now += 0.1
+            return self.now
+
+    launcher = FakeLauncher(script=b"\x01" * (BLOCK_BYTES * 3))
+    capture = PipeWireCapture(
+        config=CaptureConfig(system_enabled=False),
+        graph=FakeGraphSource(idle_graph),
+        launcher=launcher,
+        linker=None,
+        clock=TickingClock(),
+    )
+    recorder = capture.recorders[MIC]
+    recorder.start()
+    capture.pump(MIC, recorder)
+
+    stamps = [capture.queues[MIC].get(timeout=0).t_start for _ in range(3)]
+
+    # The field the sibling test is named for but never checks. Timestamps
+    # must advance, and must be relative to the capture's own origin.
+    assert stamps == sorted(stamps)
+    assert len(set(stamps)) == 3
+    assert stamps[0] >= 0.0
+
+
 def test_pump_marks_a_track_dead_when_pw_record_exits(idle_graph):
     launcher = FakeLauncher(script=b"")
     capture = PipeWireCapture(
@@ -185,3 +212,36 @@ def test_pump_marks_a_track_dead_when_pw_record_exits(idle_graph):
     # Silent death means the track goes quiet for the rest of the meeting.
     assert capture.dead_tracks == {MIC}
     assert capture.all_tracks_dead() is True
+
+
+def test_start_then_shutdown_leaves_no_thread_running(idle_graph):
+    launcher = FakeLauncher(script=b"\x01" * (BLOCK_BYTES * 2))
+    capture = PipeWireCapture(
+        config=CaptureConfig(system_enabled=False),
+        graph=FakeGraphSource(idle_graph),
+        launcher=launcher,
+        linker=None,
+        clock=FakeClock(),
+    )
+
+    capture.start()
+    assert len(capture._threads) == 1  # one pump, no tap without --app
+
+    capture.shutdown()
+
+    assert capture.stop.is_set()
+    assert all(not thread.is_alive() for thread in capture._threads)
+
+
+def test_shutdown_is_safe_to_call_twice(idle_graph):
+    capture = PipeWireCapture(
+        config=CaptureConfig(system_enabled=False),
+        graph=FakeGraphSource(idle_graph),
+        launcher=FakeLauncher(script=b""),
+        linker=None,
+        clock=FakeClock(),
+    )
+    capture.start()
+
+    capture.shutdown()
+    capture.shutdown()  # a second Ctrl-C must not raise
