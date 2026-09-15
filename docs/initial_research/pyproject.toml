@@ -1,0 +1,33 @@
+[project]
+name = "meetscribe"
+version = "0.1.0"
+description = "Live transcription of any call on your machine, captured from PipeWire"
+requires-python = ">=3.10"
+
+dependencies = [
+    # PipeWire does the resampling on Linux, so the capture path needs no numpy.
+    # It is still pulled in by the portable backend and by local whisper.
+    "numpy>=1.26",
+    # Portable (non-PipeWire) capture backend. Linux talks to PipeWire directly.
+    "soundcard>=0.4.3 ; platform_system != 'Linux'",
+    # Silence gating: a big cost saver on the metered engines. Imported behind a
+    # try/except, so the app still runs if a platform has no wheel for it.
+    "webrtcvad-wheels>=2.0.14 ; platform_system != 'Darwin'",
+    "webrtcvad>=2.0.10 ; platform_system == 'Darwin'",
+]
+
+# One extra per speech-to-text engine. Engine modules import their SDK lazily
+# inside run()/__init__, so installing only the extra you use keeps the rest out
+# of the environment without any code changes.
+[project.optional-dependencies]
+google = ["google-cloud-speech>=2.27.0"]
+deepgram = ["websockets>=13.0"]
+local = ["faster-whisper>=1.1.0"]
+
+[tool.uv]
+# Scope: this manifest describes what the *example files* in this directory need.
+# It is not the application's manifest - the real meetscribe/ package will get its
+# own pyproject.toml and uv.lock at the repo root. `package = false` keeps uv
+# managing this environment without trying to build and install anything, which
+# is what we want for a directory of research examples that never ships.
+package = false

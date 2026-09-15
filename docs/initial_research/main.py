@@ -2,9 +2,9 @@
 meetscribe - live transcription of any call on your machine.
 
 Linux/PipeWire:
-    python -m meetscribe devices
-    python -m meetscribe run --app zoom --engine google --lang uk-UA --lang en-US
-    python -m meetscribe run --engine local --model small
+    uv run python -m meetscribe devices
+    uv run python -m meetscribe run --app zoom --engine google --lang uk-UA --lang en-US
+    uv run python -m meetscribe run --engine local --model small
 """
 
 from __future__ import annotations

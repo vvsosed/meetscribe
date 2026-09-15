@@ -1,4 +1,9 @@
-# meetscribe
+# meetscribe — initial research
+
+> Write-up and example files from the initial research spike, kept as reference.
+> This is **not** the application: the code here is illustrative, incomplete and
+> not wired up to run. The real implementation lives in its own package once it
+> is written.
 
 Console app that transcribes any call on your machine — Zoom, Slack huddles,
 Meet, Teams, Discord, a browser tab — by capturing audio from PipeWire instead
@@ -31,8 +36,8 @@ Spotify, Telegram pings and YouTube in your transcript, or you move the stream
 to a null sink and stop hearing it.
 
 ```bash
-python -m meetscribe run --app zoom      # only Zoom's audio
-python -m meetscribe run                 # everything you hear (sink monitor)
+uv run python -m meetscribe run --app zoom      # only Zoom's audio
+uv run python -m meetscribe run                 # everything you hear (sink monitor)
 ```
 
 ## Requirements
@@ -45,8 +50,18 @@ sudo dnf install pipewire-utils
 # Arch
 sudo pacman -S pipewire pipewire-audio wireplumber
 
-pip install -r requirements.txt
+# uv, if you don't have it yet
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+cd docs/initial_research    # pyproject.toml and uv.lock live here
+uv sync --extra google      # or: --extra deepgram / --extra local
 ```
+
+`uv sync` creates `.venv/` here and installs from `uv.lock`, so everyone gets the
+same versions. There is one extra per engine and the engine SDKs are imported lazily,
+so installing only the one you use keeps grpc or ctranslate2 out of your
+environment entirely. Prefix commands with `uv run` and you never activate a
+venv by hand.
 
 PipeWire ≥ 0.3.60 (for `target.object` and `stream.capture.sink`). Check with
 `pw-cli --version`. Verify the tools work before anything else:
@@ -60,7 +75,7 @@ pw-record --target=0 /tmp/t.wav   # Ctrl-C, then play it back
 
 ```bash
 # start your call FIRST, then look at what's playing
-python -m meetscribe devices
+uv run python -m meetscribe devices
 
 #   === APPLICATIONS CURRENTLY PLAYING AUDIO ===
 #     serial=1204   ZOOM VoiceEngine  binary=zoom  pid=44321
@@ -70,11 +85,11 @@ python -m meetscribe devices
 export GOOGLE_APPLICATION_CREDENTIALS=~/keys/stt.json
 export GOOGLE_CLOUD_PROJECT=my-project
 
-python -m meetscribe run --app zoom --region eu --lang uk-UA --lang en-US
-python -m meetscribe run --app slack --engine deepgram
-python -m meetscribe run --engine local --model medium      # offline
-python -m meetscribe run --no-mic                           # them only
-python -m meetscribe run --phrase Kubernetes --phrase Poltava
+uv run python -m meetscribe run --app zoom --region eu --lang uk-UA --lang en-US
+uv run python -m meetscribe run --app slack --engine deepgram
+uv run python -m meetscribe run --engine local --model medium      # offline
+uv run python -m meetscribe run --no-mic                           # them only
+uv run python -m meetscribe run --phrase Kubernetes --phrase Poltava
 ```
 
 Ctrl-C writes `transcripts/<session>.md`. The `.jsonl` alongside it is
