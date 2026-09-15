@@ -22,6 +22,13 @@ BACKOFF_START_S = 2.0
 BACKOFF_CAP_S = 30.0
 ESCALATE_AFTER_FAILURES = 5
 
+# Healthy streams are rotated at MAX_STREAM_SECONDS. A stream still open well
+# past that is stalled - gRPC sets no deadline and no keepalive, so a
+# black-holed connection would otherwise leave this track silently
+# transcribing nothing for the rest of the meeting. DeadlineExceeded is not
+# fatal, so EngineWorker reconnects.
+STREAM_TIMEOUT_S = MAX_STREAM_SECONDS + 30
+
 # Retrying any of these is pointless: the configuration or the credentials are
 # wrong and will stay wrong.
 FATAL_ERRORS = (
@@ -232,6 +239,9 @@ class GoogleSpeechSession:
                     cs.SpeechAdaptation.AdaptationPhraseSet(
                         inline_phrase_set=cs.PhraseSet(
                             phrases=[
+                                # 0-20, where high values start degrading general
+                                # accuracy. 15 is aggressive enough for names and
+                                # jargon without that trade-off.
                                 cs.PhraseSet.Phrase(value=p, boost=15.0)
                                 for p in self._config.phrases
                             ]
@@ -274,7 +284,9 @@ class GoogleSpeechSession:
             for block in pcm:
                 yield cs.StreamingRecognizeRequest(audio=block)
 
-        for response in self._client.streaming_recognize(requests=requests()):
+        for response in self._client.streaming_recognize(
+            requests=requests(), timeout=STREAM_TIMEOUT_S
+        ):
             for result in response.results:
                 segment = segment_from_result(result, self._clock, self._track)
                 if segment is not None:

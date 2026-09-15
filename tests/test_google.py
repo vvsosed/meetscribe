@@ -345,7 +345,13 @@ def test_reports_audio_lost_while_offline(caplog):
     assert any("3s of audio dropped" in r.getMessage() for r in caplog.records)
 
 
-from meetscribe.google import GoogleConfig, recognizer_path, speech_endpoint
+from meetscribe.google import (
+    STREAM_TIMEOUT_S,
+    GoogleConfig,
+    GoogleSpeechSession,
+    recognizer_path,
+    speech_endpoint,
+)
 
 
 def test_regional_endpoint():
@@ -370,3 +376,52 @@ def test_config_defaults_match_the_spec():
     assert config.model == "chirp_3"
     assert config.language_codes == ("en-US",)
     assert config.interim is True
+
+
+class RecordingClient:
+    """Drains the request generator so we can inspect what was sent."""
+
+    def __init__(self):
+        self.received = None
+
+    def streaming_recognize(self, requests, timeout=None):
+        self.received = list(requests)
+        self.timeout = timeout
+        return []
+
+
+def test_stream_sends_config_first_then_one_request_per_block():
+    client = RecordingClient()
+    session = GoogleSpeechSession(
+        GoogleConfig(
+            project_id="p", phrases=("Kubernetes",), language_codes=("uk-UA", "en-US")
+        ),
+        client,
+        StreamClock(),
+        "mic",
+    )
+
+    list(session.stream(iter([b"chunk1", b"chunk2"])))
+
+    config = client.received[0].streaming_config.config
+    assert client.received[0].recognizer == "projects/p/locations/eu/recognizers/_"
+    assert list(config.language_codes) == ["uk-UA", "en-US"]
+    assert config.features.enable_word_time_offsets is True
+    assert (
+        config.adaptation.phrase_sets[0].inline_phrase_set.phrases[0].value
+        == "Kubernetes"
+    )
+    # Audio follows the config, one request per block, in order.
+    assert [r.audio for r in client.received[1:]] == [b"chunk1", b"chunk2"]
+
+
+def test_stream_bounds_the_call_with_a_timeout():
+    client = RecordingClient()
+    session = GoogleSpeechSession(
+        GoogleConfig(project_id="p"), client, StreamClock(), "mic"
+    )
+
+    list(session.stream(iter([b"x"])))
+
+    # Without this a black-holed connection stalls the track silently.
+    assert client.timeout == STREAM_TIMEOUT_S
