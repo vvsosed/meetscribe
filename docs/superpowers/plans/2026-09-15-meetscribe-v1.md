@@ -1192,8 +1192,11 @@ The detector is injected as a plain callable, which keeps the tests free of real
 Create `tests/test_vad.py`:
 
 ```python
+import random
+import struct
+
 from meetscribe.types import BLOCK_BYTES
-from meetscribe.vad import SILENCE_TAIL_BLOCKS, SilenceGate
+from meetscribe.vad import SILENCE_TAIL_BLOCKS, SilenceGate, webrtc_detector
 
 SPEECH = b"\x01" * BLOCK_BYTES
 QUIET = b"\x00" * BLOCK_BYTES
@@ -1244,6 +1247,36 @@ def test_frame_size_divides_a_block_evenly():
     # webrtcvad only accepts 10, 20 or 30 ms frames, so a 100 ms block has to
     # split into whole frames or the last one is silently dropped.
     assert BLOCK_BYTES % FRAME_BYTES == 0
+
+
+def noisy_block() -> bytes:
+    """A deterministic block of loud noise, which a VAD should hear as speech."""
+    rng = random.Random(0)
+    samples = BLOCK_BYTES // 2
+    return struct.pack(
+        f"<{samples}h", *(rng.randint(-20000, 20000) for _ in range(samples))
+    )
+
+
+def test_real_detector_hears_speech_in_a_loud_block():
+    # The stand-in detector used above never runs webrtc_detector's
+    # frame-slicing loop. This does, and it has to be the positive case:
+    # asserting only that silence is quiet would pass even if the loop
+    # never ran, since any([]) is False.
+    detect = webrtc_detector()
+    assert detect is not None, "webrtcvad-wheels is a hard dependency"
+
+    assert detect(noisy_block()) is True
+
+
+def test_real_detector_reports_silence_as_quiet():
+    # A FRESH detector on purpose: webrtcvad.Vad carries adaptive state
+    # across calls, so reusing the instance from the test above could report
+    # this silence as speech on hangover.
+    detect = webrtc_detector()
+    assert detect is not None
+
+    assert detect(b"\x00" * BLOCK_BYTES) is False
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -1281,7 +1314,17 @@ SpeechDetector = Callable[[bytes], bool]
 
 
 def webrtc_detector(aggressiveness: int = 2) -> SpeechDetector | None:
-    """Real detector, or None when webrtcvad is unavailable."""
+    """Real detector, or None when webrtcvad is unavailable.
+
+    `aggressiveness` runs 0-3, higher filtering more non-speech. 2 is a
+    middle setting chosen for meeting audio, where fans and keyboards are
+    common but clipping a quiet speaker costs more than a little extra
+    streamed silence. It is a starting point, not a measured optimum.
+
+    Note the returned closure is stateful: webrtcvad adapts to the noise
+    floor across calls, so give each track its own detector rather than
+    sharing one.
+    """
     try:
         import webrtcvad
     except ImportError:
@@ -1326,7 +1369,7 @@ class SilenceGate:
 
 Run: `uv run pytest tests/test_vad.py -v`
 
-Expected: PASS, 5 passed.
+Expected: PASS, 7 passed.
 
 - [ ] **Step 5: Commit**
 
@@ -3985,6 +4028,9 @@ def _run(args, graph, launcher, linker, clock) -> int:
             target=EngineWorker(
                 track=track,
                 session_factory=build_session_factory(google_config, track),
+                # A fresh detector per track, deliberately: webrtcvad adapts
+                # to the noise floor across calls, so a shared instance would
+                # let one track's loudness skew the other's classification.
                 gate=SilenceGate(webrtc_detector()),
                 clock=clock,
             ).run,
