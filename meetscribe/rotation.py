@@ -26,5 +26,11 @@ class StreamClock:
         return self.offset + stream_relative_s
 
     def rotated(self, last_chunk_t: float) -> StreamClock:
-        """Clock for the next stream. max() guards against rewinding."""
+        """Clock for the next stream. max() guards against rewinding.
+
+        `last_chunk_t` must already be on the session-absolute timeline — a
+        raw `AudioChunk.t_start`, not a time reported by the closing stream.
+        Do not pass it through `absolute()` first: that double-applies the
+        offset and compounds on every rotation.
+        """
         return replace(self, offset=max(self.offset, last_chunk_t))
