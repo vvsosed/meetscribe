@@ -3812,7 +3812,7 @@ Merge the new imports into the module's existing import block.
 
 Run: `uv run pytest tests/test_google.py -v`
 
-Expected: PASS, 19 passed.
+Expected: PASS, 20 passed.
 
 - [ ] **Step 5: Commit**
 
