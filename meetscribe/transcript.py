@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import threading
 from datetime import datetime, timezone
@@ -14,7 +15,17 @@ LABELS = {MIC: "You", SYSTEM: "Them"}
 COLORS = {MIC: "\033[36m", SYSTEM: "\033[33m"}
 DIM = "\033[2m"
 RESET = "\033[0m"
-INTERIM_MAX_WIDTH = 160
+
+
+def _interim_width() -> int:
+    """Columns the interim line may occupy.
+
+    Derived from the real terminal, not a fixed maximum: a line wider than
+    the terminal wraps, and the \\r erase only clears the row the cursor is
+    on - leaving the wrapped remainder on screen for the rest of the meeting.
+    One column is left spare so writing the last cell cannot wrap.
+    """
+    return max(1, shutil.get_terminal_size((80, 24)).columns - 1)
 
 
 def hhmmss(seconds: float) -> str:
@@ -67,7 +78,7 @@ class TranscriptWriter:
                 if self.show_interim:
                     self._clear_interim()
                     line = f"{hhmmss(segment.t_start)} {label}: {segment.text}"
-                    line = line[:INTERIM_MAX_WIDTH]
+                    line = line[: _interim_width()]
                     sys.stdout.write(f"{DIM}{line}{RESET}" if self.color else line)
                     sys.stdout.flush()
                     self._interim_width = len(line)

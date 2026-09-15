@@ -1,6 +1,8 @@
 import json
+import os
+import shutil
 
-from meetscribe.transcript import TranscriptWriter, hhmmss, render_markdown
+from meetscribe.transcript import TranscriptWriter, _interim_width, hhmmss, render_markdown
 from meetscribe.types import Segment
 
 
@@ -101,3 +103,43 @@ def test_creates_the_output_directory(tmp_path):
     TranscriptWriter(target, session="sess")
 
     assert target.is_dir()
+
+
+def test_final_lines_print_a_stamp_and_a_speaker_label(tmp_path, capsys):
+    writer = TranscriptWriter(tmp_path, session="sess")
+
+    writer.write(final("mic", "hello", 61.0))
+    writer.write(final("system", "hi back", 62.0))
+
+    out = capsys.readouterr().out
+    assert "00:01:01 You: hello" in out
+    assert "00:01:02 Them: hi back" in out
+
+
+def test_console_output_is_plain_when_stdout_is_not_a_tty(tmp_path, capsys):
+    writer = TranscriptWriter(tmp_path, session="sess")
+
+    writer.write(final("mic", "hello", 0.0))
+
+    # No cursor to rewrite and no point in colour under a pipe.
+    assert "\x1b[" not in capsys.readouterr().out
+
+
+def test_interim_lines_are_silent_when_stdout_is_not_a_tty(tmp_path, capsys):
+    writer = TranscriptWriter(tmp_path, session="sess")
+
+    writer.write(
+        Segment(track="mic", text="partial", is_final=False, t_start=0.0, t_end=1.0)
+    )
+
+    assert capsys.readouterr().out == ""
+
+
+def test_interim_width_follows_the_terminal(monkeypatch):
+    monkeypatch.setattr(
+        shutil, "get_terminal_size", lambda fallback=(80, 24): os.terminal_size((40, 24))
+    )
+
+    # A fixed width wider than the terminal wraps, and the \r erase then
+    # clears only one of the two rows.
+    assert _interim_width() == 39
