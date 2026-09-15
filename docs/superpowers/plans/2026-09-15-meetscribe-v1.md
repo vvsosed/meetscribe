@@ -618,6 +618,7 @@ Create `tests/fixtures/pw_dump_zoom_active.json` — the same graph plus a live 
 Create `tests/test_graph.py`:
 
 ```python
+import json
 from pathlib import Path
 
 import pytest
@@ -687,6 +688,39 @@ def test_ports_are_filtered_by_node_and_direction(zoom):
 def test_matching_is_case_insensitive(zoom):
     assert zoom.find("ZOOM", PLAYBACK_STREAM) is not None
     assert zoom.find("Spotify", PLAYBACK_STREAM).app_binary == "spotify"
+
+
+def test_serial_falls_back_to_id_with_a_warning(caplog):
+    # Degrading is better than crashing, but it must not happen silently:
+    # a recycled id can point pw-record at the wrong stream mid-meeting.
+    dump = json.dumps(
+        [
+            {
+                "id": 77,
+                "type": "PipeWire:Interface:Node",
+                "info": {
+                    "props": {
+                        "media.class": "Audio/Sink",
+                        "node.name": "sink-without-serial",
+                    }
+                },
+            }
+        ]
+    )
+
+    graph = parse_graph(dump)
+
+    assert graph.node_by_name("sink-without-serial").serial == 77
+    assert "no object.serial" in caplog.text
+
+
+def test_empty_dump_yields_an_empty_graph():
+    graph = parse_graph("[]")
+
+    assert graph.nodes == ()
+    assert graph.ports == ()
+    assert graph.default_sink is None
+    assert graph.default_source is None
 ```
 
 - [ ] **Step 3: Run it to verify it fails**
@@ -710,12 +744,15 @@ fixture with no PipeWire session.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 
 # media.class values, per pipewire-props(7)
 SINK = "Audio/Sink"
 SOURCE = "Audio/Source"
 PLAYBACK_STREAM = "Stream/Output/Audio"  # an application producing sound
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -786,10 +823,20 @@ def parse_graph(dump_text: str) -> PwGraph:
             media_class = props.get("media.class")
             if not media_class:
                 continue  # links, filters and other plumbing we do not care about
+            serial = props.get("object.serial")
+            if serial is None:
+                serial = obj["id"]
+                log.warning(
+                    "node %r has no object.serial; falling back to id %s, which "
+                    "PipeWire recycles - a long capture targeting it may end up "
+                    "on the wrong stream",
+                    props.get("node.name", ""),
+                    serial,
+                )
             nodes.append(
                 PwNode(
                     id=obj["id"],
-                    serial=props.get("object.serial", obj["id"]),
+                    serial=serial,
                     name=props.get("node.name", ""),
                     description=props.get("node.description", ""),
                     media_class=media_class,
@@ -827,7 +874,7 @@ def parse_graph(dump_text: str) -> PwGraph:
 
 Run: `uv run pytest tests/test_graph.py -v`
 
-Expected: PASS, 9 passed.
+Expected: PASS, 11 passed.
 
 - [ ] **Step 6: Commit**
 
@@ -3610,6 +3657,8 @@ git commit -m "feat: add transcript console, JSONL and Markdown sinks"
 Create `tests/test_cli.py`:
 
 ```python
+import json
+
 import pytest
 
 from meetscribe.cli import build_parser, describe_graph, main
@@ -3688,6 +3737,17 @@ def test_devices_command_returns_zero(capsys, zoom_graph):
     assert "APPLICATIONS" in capsys.readouterr().out
 
 
+def test_malformed_pw_dump_reports_cleanly(capsys):
+    class BrokenGraph:
+        def snapshot(self):
+            raise json.JSONDecodeError("Expecting value", "", 0)
+
+    code = main(["devices"], graph=BrokenGraph())
+
+    assert code == 1
+    assert "pw-dump" in capsys.readouterr().err
+
+
 def test_run_reports_a_missing_device_without_a_traceback(capsys, idle_graph):
     code = main(
         ["run", "--mic", "nonexistent-device", "--project", "p"],
@@ -3732,6 +3792,7 @@ Create `meetscribe/cli.py`:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import queue
 import signal
@@ -3873,6 +3934,15 @@ def main(
             print(describe_graph(graph.snapshot()))
             return 0
         return _run(args, graph, launcher, linker, clock)
+    except json.JSONDecodeError as exc:
+        # Not a RuntimeError, so the clause below would miss it and the user
+        # would get a traceback instead of one clean line.
+        print(
+            f"Could not parse pw-dump output ({exc}). Is PipeWire running? "
+            "Check with: pw-dump | head",
+            file=sys.stderr,
+        )
+        return 1
     except (CaptureError, MissingToolError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
