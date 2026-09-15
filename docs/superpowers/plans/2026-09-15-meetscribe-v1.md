@@ -1889,6 +1889,50 @@ def test_records_which_applications_were_tapped(zoom_graph):
     assert tap.tapped_labels == {"ZOOM VoiceEngine"}
 
 
+def test_relinks_a_restarted_stream_whose_port_ids_were_recycled(zoom_graph):
+    # PipeWire hands a dead stream's port ids to a new one within a poll
+    # interval - verified against a live session. The old link died with the
+    # old node, so the new stream must be linked even though the ids match.
+    linker = FakeLinker()
+    restarted = replace(
+        zoom_graph,
+        nodes=tuple(
+            replace(n, serial=1900) if n.id == 55 else n for n in zoom_graph.nodes
+        ),
+    )
+    tap = make_tap(
+        with_capture_node(zoom_graph), with_capture_node(restarted), linker=linker
+    )
+
+    assert tap.poll_once() == 2
+    assert tap.poll_once() == 2
+    assert linker.links == [(60, 700), (61, 700), (60, 700), (61, 700)]
+
+
+def test_a_failed_link_is_retried_next_poll(zoom_graph):
+    # pw-link can lose a race with a stream still negotiating its format.
+    # That must not poison the pair for the rest of the session.
+    linker = FakeLinker(result=LinkResult.FAILED)
+    tap = make_tap(with_capture_node(zoom_graph), linker=linker)
+
+    assert tap.poll_once() == 0
+    assert tap.poll_once() == 0
+
+    assert len(linker.links) == 4
+
+
+def test_a_failed_link_warns_once_not_every_poll(zoom_graph, caplog):
+    linker = FakeLinker(result=LinkResult.FAILED)
+    tap = make_tap(with_capture_node(zoom_graph), linker=linker)
+
+    tap.poll_once()
+    tap.poll_once()
+    tap.poll_once()
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 2  # one per port, not one per poll
+
+
 def test_run_polls_on_the_interval_until_stopped(zoom_graph):
     stop = threading.Event()
     clock = FakeClock()
@@ -1937,6 +1981,11 @@ The watcher re-scans because applications create their audio streams late:
 Zoom does it when the meeting starts, not when the app launches. Anything
 that resolves nodes once at startup records silence. The same re-scan covers
 reconnects when someone switches headphones mid-call.
+
+Links are tracked by node serial and port name, never by port id. PipeWire
+recycles port ids, and a restarted stream can be handed its dead
+predecessor's ids inside one poll interval - keying on ids would make us
+skip linking it and capture silence for the rest of the meeting.
 """
 
 from __future__ import annotations
@@ -1968,7 +2017,8 @@ class AppTap:
         self._linker = linker
         self._clock = clock
         self._interval = interval
-        self._linked: set[tuple[int, int]] = set()
+        self._linked: set[tuple[int, str, str]] = set()
+        self._warned: set[tuple[int, str, str]] = set()
         self.tapped_labels: set[str] = set()
 
     def poll_once(self) -> int:
@@ -1997,11 +2047,33 @@ class AppTap:
             for index, out_port in enumerate(outputs):
                 # Fan every channel into our mono input; PipeWire sums them.
                 in_port = inputs[min(index, len(inputs) - 1)]
-                pair = (out_port.id, in_port.id)
+                # Keyed on the node's serial and the port NAMES, never on port
+                # ids: PipeWire recycles ids, and a restarted stream can be
+                # handed its dead predecessor's ids within one poll interval.
+                pair = (source.serial, out_port.name, in_port.name)
                 if pair in self._linked:
                     continue
+
+                result = self._linker.link(out_port.id, in_port.id)
+                if result is LinkResult.FAILED:
+                    log.debug(
+                        "link %s:%s -> %s failed",
+                        source.label,
+                        out_port.name,
+                        in_port.name,
+                    )
+                    if pair not in self._warned:
+                        self._warned.add(pair)
+                        log.warning(
+                            "could not link %s (%s) into the capture node - "
+                            "audio from that application may be missing",
+                            source.label,
+                            out_port.name,
+                        )
+                    continue  # deliberately not recorded, so it is retried
+
                 self._linked.add(pair)
-                if self._linker.link(out_port.id, in_port.id) is LinkResult.LINKED:
+                if result is LinkResult.LINKED:
                     created += 1
         return created
 
@@ -2018,7 +2090,7 @@ class AppTap:
 
 Run: `uv run pytest tests/test_tap.py -v`
 
-Expected: PASS, 8 passed.
+Expected: PASS, 11 passed.
 
 - [ ] **Step 5: Commit**
 
