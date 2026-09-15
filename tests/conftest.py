@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Sequence
 
 import pytest
 
 from meetscribe.graph import PwGraph, parse_graph
 from meetscribe.ports import LinkResult
-from meetscribe.types import Segment
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -117,22 +116,6 @@ class FakeClock:
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
-
-
-class FakeSpeechSession:
-    """Yields canned segments, or raises to exercise the retry/fatal split."""
-
-    def __init__(self, segments: Sequence[Segment] = (), error: Exception | None = None):
-        self.segments = list(segments)
-        self.error = error
-        self.consumed: list[bytes] = []
-
-    def stream(self, pcm: Iterator[bytes]) -> Iterator[Segment]:
-        for block in pcm:
-            self.consumed.append(block)
-        if self.error is not None:
-            raise self.error
-        yield from self.segments
 
 
 @pytest.fixture
