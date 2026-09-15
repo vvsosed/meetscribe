@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import logging
+import queue as queue_module
+import threading
+from typing import Callable, Iterator
 
 from google.api_core import exceptions as gexc
 
-from .rotation import StreamClock
+from .ports import Clock, SpeechSession
+from .rotation import MAX_STREAM_SECONDS, StreamClock
 from .types import Segment, Word
+from .vad import SilenceGate
 
 log = logging.getLogger(__name__)
 
@@ -78,3 +83,86 @@ def is_fatal(exc: BaseException) -> bool:
 
 def next_backoff(previous: float) -> float:
     return min(previous * 2, BACKOFF_CAP_S)
+
+
+SessionFactory = Callable[[StreamClock], SpeechSession]
+
+
+class EngineWorker:
+    """Drives one track's audio through rotating recognition streams."""
+
+    def __init__(
+        self,
+        track: str,
+        session_factory: SessionFactory,
+        gate: SilenceGate,
+        clock: Clock,
+        max_stream_s: float = MAX_STREAM_SECONDS,
+    ):
+        self._track = track
+        self._factory = session_factory
+        self._gate = gate
+        self._clock = clock
+        self._max_stream_s = max_stream_s
+
+    def run(
+        self,
+        audio_q,
+        out_q: queue_module.Queue,
+        stop: threading.Event,
+    ) -> None:
+        stream_clock = StreamClock(max_stream_s=self._max_stream_s)
+        backoff = BACKOFF_START_S
+        consecutive_failures = 0
+
+        while not stop.is_set():
+            last_chunk_t = stream_clock.offset
+            started = self._clock.monotonic()
+
+            def blocks() -> Iterator[bytes]:
+                nonlocal last_chunk_t
+                while not stop.is_set():
+                    if stream_clock.should_rotate(self._clock.monotonic() - started):
+                        log.debug("rotating %s stream", self._track)
+                        return
+                    try:
+                        chunk = audio_q.get(timeout=0.25)
+                    except queue_module.Empty:
+                        continue
+                    last_chunk_t = chunk.t_start
+                    if self._gate.allows(chunk.pcm):
+                        yield chunk.pcm
+
+            try:
+                for segment in self._factory(stream_clock).stream(blocks()):
+                    out_q.put(segment)
+                consecutive_failures = 0
+                backoff = BACKOFF_START_S
+            except Exception as exc:
+                if stop.is_set():
+                    break
+                if is_fatal(exc):
+                    log.error(
+                        "speech configuration error (%s), not retryable: %s",
+                        self._track,
+                        exc,
+                    )
+                    stop.set()
+                    return
+                consecutive_failures += 1
+                level = (
+                    logging.ERROR
+                    if consecutive_failures >= ESCALATE_AFTER_FAILURES
+                    else logging.WARNING
+                )
+                log.log(
+                    level,
+                    "speech stream error (%s), retrying in %.0fs: %s",
+                    self._track,
+                    backoff,
+                    exc,
+                )
+                self._clock.sleep(backoff)
+                backoff = next_backoff(backoff)
+
+            stream_clock = stream_clock.rotated(last_chunk_t)

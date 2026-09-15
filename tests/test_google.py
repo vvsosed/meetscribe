@@ -106,3 +106,207 @@ def test_backoff_doubles_up_to_a_cap():
 
     assert delays[:4] == [2.0, 4.0, 8.0, 16.0]
     assert delays[-1] == BACKOFF_CAP_S
+
+
+import queue
+import threading
+
+from google.api_core import exceptions as gexc
+
+from meetscribe.google import EngineWorker
+from meetscribe.types import BLOCK_BYTES, AudioChunk, Segment
+from meetscribe.vad import SilenceGate
+from tests.conftest import FakeClock
+
+PCM = b"\x01" * BLOCK_BYTES
+
+
+def seg(text, track="mic"):
+    return Segment(track=track, text=text, is_final=True, t_start=0.0, t_end=1.0)
+
+
+class ScriptedSession:
+    """Fails on connect, or consumes blocks and yields canned segments."""
+
+    def __init__(
+        self,
+        clock_state,
+        *,
+        segments=(),
+        error=None,
+        clock=None,
+        tick=0.0,
+        stop=None,
+        stop_after=None,
+    ):
+        self.clock_state = clock_state
+        self.segments = list(segments)
+        self.error = error
+        self.clock = clock
+        self.tick = tick
+        self.stop = stop
+        self.stop_after = stop_after
+        self.consumed: list[bytes] = []
+
+    def stream(self, pcm):
+        # A real transport error surfaces when the stream opens, before any
+        # audio has flowed. Raising here keeps the tests from having to drain
+        # the whole queue first.
+        if self.error is not None:
+            raise self.error
+        for block in pcm:
+            self.consumed.append(block)
+            if self.clock is not None and self.tick:
+                self.clock.advance(self.tick)
+            if self.stop_after and len(self.consumed) >= self.stop_after:
+                self.stop.set()
+        yield from self.segments
+
+
+def filled_queue(count: int, start: float = 0.0) -> queue.Queue:
+    q: queue.Queue = queue.Queue()
+    for i in range(count):
+        q.put(AudioChunk(track="mic", pcm=PCM, t_start=start + i))
+    return q
+
+
+def test_emits_segments_from_the_session():
+    stop = threading.Event()
+    sessions = []
+
+    def factory(clock_state):
+        session = ScriptedSession(clock_state, segments=[seg("hello"), seg("world")])
+        sessions.append(session)
+        stop.set()  # one pass is enough; blocks() then yields nothing
+        return session
+
+    out: queue.Queue = queue.Queue()
+    worker = EngineWorker(
+        track="mic",
+        session_factory=factory,
+        gate=SilenceGate(detector=None),
+        clock=FakeClock(),
+    )
+    worker.run(filled_queue(2), out, stop)
+
+    assert [out.get_nowait().text for _ in range(2)] == ["hello", "world"]
+
+
+def test_silence_gate_filters_blocks_before_they_are_sent():
+    stop = threading.Event()
+    sessions = []
+    quiet = b"\x00" * BLOCK_BYTES
+
+    def factory(clock_state):
+        session = ScriptedSession(clock_state, stop=stop, stop_after=6)
+        sessions.append(session)
+        return session
+
+    audio: queue.Queue = queue.Queue()
+    audio.put(AudioChunk(track="mic", pcm=PCM, t_start=0.0))
+    for i in range(10):
+        audio.put(AudioChunk(track="mic", pcm=quiet, t_start=float(i + 1)))
+
+    worker = EngineWorker(
+        track="mic",
+        session_factory=factory,
+        gate=SilenceGate(detector=lambda pcm: pcm != quiet),
+        clock=FakeClock(),
+    )
+    worker.run(audio, queue.Queue(), stop)
+
+    # One speech block plus the five-block finalisation tail, nothing more.
+    assert len(sessions[0].consumed) == 6
+
+
+def test_rotates_and_carries_the_offset_forward():
+    stop = threading.Event()
+    clock = FakeClock()
+    seen_offsets: list[float] = []
+
+    def factory(clock_state):
+        seen_offsets.append(clock_state.offset)
+        if len(seen_offsets) == 2:
+            stop.set()
+        # Each consumed block advances the clock by 0.5 s, so two blocks hit
+        # the 1 s rotation limit.
+        return ScriptedSession(clock_state, clock=clock, tick=0.5)
+
+    worker = EngineWorker(
+        track="mic",
+        session_factory=factory,
+        gate=SilenceGate(detector=None),
+        clock=clock,
+        max_stream_s=1.0,
+    )
+    worker.run(filled_queue(6, start=100.0), queue.Queue(), stop)
+
+    assert seen_offsets[0] == 0.0
+    # Second stream resumes from the last chunk seen, not from zero.
+    assert seen_offsets[1] > 0.0
+
+
+def test_fatal_errors_stop_the_run_immediately():
+    stop = threading.Event()
+    attempts = []
+
+    def factory(clock_state):
+        attempts.append(1)
+        return ScriptedSession(clock_state, error=gexc.Unauthenticated("bad creds"))
+
+    clock = FakeClock()
+    worker = EngineWorker(
+        track="mic",
+        session_factory=factory,
+        gate=SilenceGate(detector=None),
+        clock=clock,
+    )
+    worker.run(filled_queue(1), queue.Queue(), stop)
+
+    assert len(attempts) == 1  # no retry loop
+    assert stop.is_set()
+    assert clock.slept == []  # and no backoff sleep
+
+
+def test_transport_errors_retry_with_growing_backoff():
+    stop = threading.Event()
+    attempts = []
+
+    def factory(clock_state):
+        attempts.append(1)
+        if len(attempts) >= 4:  # three failures, then stop before the fourth sleep
+            stop.set()
+        return ScriptedSession(clock_state, error=gexc.ServiceUnavailable("nope"))
+
+    clock = FakeClock()
+    worker = EngineWorker(
+        track="mic",
+        session_factory=factory,
+        gate=SilenceGate(detector=None),
+        clock=clock,
+    )
+    worker.run(filled_queue(1), queue.Queue(), stop)
+
+    assert clock.slept == [2.0, 4.0, 8.0]
+
+
+def test_repeated_failures_escalate_to_error_level(caplog):
+    stop = threading.Event()
+    attempts = []
+
+    def factory(clock_state):
+        attempts.append(1)
+        if len(attempts) >= 7:  # escalation starts at the fifth failure
+            stop.set()
+        return ScriptedSession(clock_state, error=gexc.ServiceUnavailable("nope"))
+
+    worker = EngineWorker(
+        track="mic",
+        session_factory=factory,
+        gate=SilenceGate(detector=None),
+        clock=FakeClock(),
+    )
+    worker.run(filled_queue(1), queue.Queue(), stop)
+
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert errors, "a dead network must not scroll past at warning level forever"
