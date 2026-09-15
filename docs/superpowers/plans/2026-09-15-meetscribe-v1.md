@@ -1988,7 +1988,8 @@ def test_repeated_graph_failures_escalate_to_a_warning(caplog):
     # Quiet for a blip, one warning once it is clearly persistent, and not
     # one per poll after that.
     assert len(warnings) == 1
-    assert "PipeWire graph" in warnings[0].getMessage()
+    assert "failing repeatedly" in warnings[0].getMessage()
+    assert "pw-dump exploded" in warnings[0].getMessage()
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -2121,8 +2122,10 @@ class AppTap:
                     # One blip is unremarkable. Failing repeatedly means we are
                     # blind to new streams for the rest of the meeting, which
                     # must not be debug-only. Warn once, not every poll.
+                    # The cause is whatever %s carries - it may be the graph
+                    # read, but a missing pw-link lands here too.
                     log.warning(
-                        "cannot read the PipeWire graph (%s) - no longer "
+                        "tap watcher failing repeatedly (%s) - no longer "
                         "picking up new streams matching %r",
                         exc,
                         self._pattern,
@@ -2367,10 +2370,6 @@ class PopenProcess:
         """The tail of whatever the process wrote to stderr."""
         if self._stderr_file is None:
             return ""
-        # The child writes through an inherited fd, so its output is already
-        # on disk. This flush only matters when a caller wrote through this
-        # handle itself, as the tests do.
-        self._stderr_file.flush()
         end = self._stderr_file.seek(0, os.SEEK_END)
         self._stderr_file.seek(max(0, end - STDERR_TAIL_BYTES))
         return self._stderr_file.read().decode(errors="replace")
