@@ -99,10 +99,6 @@ class PopenProcess:
         """The tail of whatever the process wrote to stderr."""
         if self._stderr_file is None:
             return ""
-        # The child writes through an inherited fd, so its output is already
-        # on disk. This flush only matters when a caller wrote through this
-        # handle itself, as the tests do.
-        self._stderr_file.flush()
         end = self._stderr_file.seek(0, os.SEEK_END)
         self._stderr_file.seek(max(0, end - STDERR_TAIL_BYTES))
         return self._stderr_file.read().decode(errors="replace")

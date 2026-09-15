@@ -114,8 +114,10 @@ class AppTap:
                     # One blip is unremarkable. Failing repeatedly means we are
                     # blind to new streams for the rest of the meeting, which
                     # must not be debug-only. Warn once, not every poll.
+                    # The cause is whatever %s carries - it may be the graph
+                    # read, but a missing pw-link lands here too.
                     log.warning(
-                        "cannot read the PipeWire graph (%s) - no longer "
+                        "tap watcher failing repeatedly (%s) - no longer "
                         "picking up new streams matching %r",
                         exc,
                         self._pattern,

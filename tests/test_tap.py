@@ -202,4 +202,5 @@ def test_repeated_graph_failures_escalate_to_a_warning(caplog):
     # Quiet for a blip, one warning once it is clearly persistent, and not
     # one per poll after that.
     assert len(warnings) == 1
-    assert "PipeWire graph" in warnings[0].getMessage()
+    assert "failing repeatedly" in warnings[0].getMessage()
+    assert "pw-dump exploded" in warnings[0].getMessage()
