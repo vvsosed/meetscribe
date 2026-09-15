@@ -899,7 +899,9 @@ The Protocols are trivial. The fakes are the real deliverable — every later ta
 Create `tests/test_ports.py`:
 
 ```python
+from meetscribe.graph import PwGraph
 from meetscribe.ports import LinkResult
+from tests.conftest import FakeGraphSource
 
 
 def test_link_result_distinguishes_duplicate_from_failure():
@@ -909,12 +911,23 @@ def test_link_result_distinguishes_duplicate_from_failure():
     assert LinkResult.ALREADY_LINKED is not LinkResult.LINKED
 
 
-def test_fakes_satisfy_the_protocols(fake_launcher, fake_linker, fake_clock):
-    from meetscribe.ports import Clock, Linker, ProcessLauncher
+def test_fakes_expose_the_protocol_methods(fake_launcher, fake_linker, fake_clock):
+    # @runtime_checkable only verifies that the method NAMES exist. It checks
+    # neither signatures nor return types, so this pins the shape of the fakes,
+    # not their contracts.
+    from meetscribe.ports import (
+        Clock,
+        GraphSource,
+        Linker,
+        ManagedProcess,
+        ProcessLauncher,
+    )
 
     assert isinstance(fake_launcher, ProcessLauncher)
     assert isinstance(fake_linker, Linker)
     assert isinstance(fake_clock, Clock)
+    assert isinstance(fake_launcher.spawn(["pw-record"]), ManagedProcess)
+    assert isinstance(FakeGraphSource(PwGraph()), GraphSource)
 
 
 def test_fake_clock_advances_on_sleep(fake_clock):
@@ -1010,13 +1023,12 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Sequence
 
 import pytest
 
 from meetscribe.graph import PwGraph, parse_graph
 from meetscribe.ports import LinkResult
-from meetscribe.types import Segment
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -1123,22 +1135,6 @@ class FakeClock:
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
-
-
-class FakeSpeechSession:
-    """Yields canned segments, or raises to exercise the retry/fatal split."""
-
-    def __init__(self, segments: Sequence[Segment] = (), error: Exception | None = None):
-        self.segments = list(segments)
-        self.error = error
-        self.consumed: list[bytes] = []
-
-    def stream(self, pcm: Iterator[bytes]) -> Iterator[Segment]:
-        for block in pcm:
-            self.consumed.append(block)
-        if self.error is not None:
-            raise self.error
-        yield from self.segments
 
 
 @pytest.fixture

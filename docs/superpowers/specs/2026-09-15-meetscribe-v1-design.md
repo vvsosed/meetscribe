@@ -241,16 +241,17 @@ tests/
   fixtures/
     pw_dump_idle.json          # sinks and sources, no app streams
     pw_dump_zoom_active.json   # the above plus a Stream/Output/Audio node
-  conftest.py                  # FakeGraphSource, FakeLauncher, FakeLinker,
-                               # FakeSpeech, FakeClock
+  conftest.py                  # FakeGraphSource, FakeLauncher,
+                               # FakeLinker, FakeClock
   test_graph.py   test_recorder.py   test_tap.py
   test_rotation.py  test_vad.py  test_transcript.py  test_cli.py
 ```
 
 The fakes are the real deliverable of the port design. `FakeLauncher` records
 argv and replays a scripted byte stream including deliberately short reads.
-`FakeSpeech` yields canned segments and can raise, exercising the
-retryable-versus-fatal split. `FakeClock` advances on demand, so the 240-second
+The speech double lives beside its own tests in `test_google.py` rather than in
+`conftest.py`: it has to raise on connect and interleave with the rotation
+clock, which is specific enough that a shared fake would not serve it. `FakeClock` advances on demand, so the 240-second
 rotation and the 2-second tap interval both test in microseconds.
 
 ### Fixture capture
