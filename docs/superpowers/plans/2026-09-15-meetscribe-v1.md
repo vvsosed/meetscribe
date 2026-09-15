@@ -146,6 +146,10 @@ git commit -m "feat: scaffold meetscribe package with uv and pytest"
 Create `tests/test_types.py`:
 
 ```python
+import dataclasses
+
+import pytest
+
 from meetscribe.types import BLOCK_BYTES, BLOCK_MS, TARGET_RATE, AudioChunk, Segment, Word
 
 
@@ -160,6 +164,18 @@ def test_audio_chunk_is_immutable():
 
     assert chunk.track == "mic"
     assert len(chunk.pcm) == BLOCK_BYTES
+
+    # frozen=True is what stops a producer mutating a chunk it has already
+    # handed to a queue, so pin it rather than assuming it.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        chunk.track = "system"
+
+
+def test_segment_is_immutable():
+    seg = Segment(track="mic", text="hello", is_final=True, t_start=0.0, t_end=1.0)
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        seg.text = "changed"
 
 
 def test_segment_defaults_to_no_words():
@@ -237,7 +253,7 @@ class Segment:
 
 Run: `uv run pytest tests/test_types.py -v`
 
-Expected: PASS, 4 passed.
+Expected: PASS, 5 passed.
 
 - [ ] **Step 5: Commit**
 
