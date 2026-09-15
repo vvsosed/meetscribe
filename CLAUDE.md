@@ -76,29 +76,39 @@ Engine credentials: `GOOGLE_APPLICATION_CREDENTIALS` (service account key path) 
 
 ## Architecture
 
-This is the pipeline as built. The diagram and per-file notes below still use the stage
-names from `docs/initial_research/`'s example files (`pipewire.py`, `engines.py`); the
-modules that actually implement each stage are the ones listed in Repository layout above
-(`graph.py`/`adapters.py`/`recorder.py`/`tap.py`/`capture.py` for capture, `google.py` for
-the engine — there is only the one engine, not a pluggable set — `transcript.py` unchanged).
-
-A three-stage pipeline wired together in `cli.py`, with `threading.Queue` as every seam:
+`cli.py` wires a `PipeWireCapture` (one `Recorder` per track, framing `pw-record`'s stdout
+into blocks behind a `DroppingQueue`) to one `EngineWorker` per track, both landing on a
+shared `Queue[Segment]` that `TranscriptWriter` is the single consumer of:
 
 ```
-capture backend ──► queues[track] ──► engine.run() thread per track ──► out_q ──► TranscriptWriter
-   (pipewire.py)     AudioChunk        (engines.py)                    Segment     (transcript.py)
+ PipeWireCapture ─┬── recorder(mic) ────► DroppingQueue ──► EngineWorker ──┐
+   (capture.py)   │     (recorder.py)      (capture.py)      (google.py)   ├─► Queue[Segment]
+                  └── recorder(system) ──► DroppingQueue ──► EngineWorker ──┘         │
+                             ▲                                                        ▼
+                        AppTap (tap.py)                             TranscriptWriter (transcript.py)
+                        only with --app
 ```
 
-- **`pipewire.py`** — parses `pw-dump` JSON into `PwGraph`/`PwNode`/`PwPort`, spawns one
-  `pw-record` subprocess per track (`PwRecorder`), and for `--app` runs an `AppTap` watcher.
-  `PipeWireCapture` owns the recorders and exposes `.queues: dict[track, Queue]`.
-- **`engines.py`** — `Engine` is a Protocol with a single method
-  `run(track, audio_q, out_q, stop)`. `ChunkReader` adapts a queue into a PCM generator and
-  applies VAD gating. `build_engine(name, cfg)` is the only construction path.
-- **`transcript.py`** — `TranscriptWriter` is the single consumer of `out_q`; console +
-  `.jsonl` + `.md`.
-
-Swapping an engine is a config change, not a code change — a property worth preserving.
+- `types.py` — `AudioChunk`, `Segment`, `Word` and the audio constants. Imports nothing from
+  the package.
+- `ports.py` — the six Protocols (`GraphSource`, `ManagedProcess`, `ProcessLauncher`,
+  `Linker`, `SpeechSession`, `Clock`) plus `LinkResult`. Each has one real implementation and
+  one fake.
+- `graph.py` — parses `pw-dump` text into a `PwGraph`. Pure; never runs a subprocess.
+- `rotation.py` — `StreamClock` for rotation offsets, `AudioTimeline` for mapping sent-audio
+  positions back to capture times.
+- `vad.py` — `SilenceGate`, dropping silence but keeping a tail so utterances finalise.
+- `recorder.py` — builds the `pw-record` argv and frames its stdout into fixed blocks.
+- `tap.py` — `AppTap`, linking a matching application's ports into the capture node and
+  re-scanning every 2 s.
+- `capture.py` — `plan_recorders` decides what to record; `PipeWireCapture` owns the
+  recorders, queues and threads.
+- `adapters.py` — the real ports. **The only module that starts a subprocess.**
+- `google.py` — result mapping, the retryable/fatal split, `EngineWorker`'s rotation and
+  retry loop, and the Chirp 3 session.
+- `transcript.py` — the live console line, the append-only JSONL, and the Markdown rendered
+  at close.
+- `cli.py` / `__main__.py` — argparse, wiring, signals, shutdown.
 
 ### Invariants
 
