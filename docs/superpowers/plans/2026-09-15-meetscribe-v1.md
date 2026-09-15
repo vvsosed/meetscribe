@@ -3904,8 +3904,15 @@ Create `tests/test_transcript.py`:
 
 ```python
 import json
+import os
+import shutil
 
-from meetscribe.transcript import TranscriptWriter, hhmmss, render_markdown
+from meetscribe.transcript import (
+    TranscriptWriter,
+    _interim_width,
+    hhmmss,
+    render_markdown,
+)
 from meetscribe.types import Segment
 
 
@@ -4006,6 +4013,46 @@ def test_creates_the_output_directory(tmp_path):
     TranscriptWriter(target, session="sess")
 
     assert target.is_dir()
+
+
+def test_final_lines_print_a_stamp_and_a_speaker_label(tmp_path, capsys):
+    writer = TranscriptWriter(tmp_path, session="sess")
+
+    writer.write(final("mic", "hello", 61.0))
+    writer.write(final("system", "hi back", 62.0))
+
+    out = capsys.readouterr().out
+    assert "00:01:01 You: hello" in out
+    assert "00:01:02 Them: hi back" in out
+
+
+def test_console_output_is_plain_when_stdout_is_not_a_tty(tmp_path, capsys):
+    writer = TranscriptWriter(tmp_path, session="sess")
+
+    writer.write(final("mic", "hello", 0.0))
+
+    # No cursor to rewrite and no point in colour under a pipe.
+    assert "\x1b[" not in capsys.readouterr().out
+
+
+def test_interim_lines_are_silent_when_stdout_is_not_a_tty(tmp_path, capsys):
+    writer = TranscriptWriter(tmp_path, session="sess")
+
+    writer.write(
+        Segment(track="mic", text="partial", is_final=False, t_start=0.0, t_end=1.0)
+    )
+
+    assert capsys.readouterr().out == ""
+
+
+def test_interim_width_follows_the_terminal(monkeypatch):
+    monkeypatch.setattr(
+        shutil, "get_terminal_size", lambda fallback=(80, 24): os.terminal_size((40, 24))
+    )
+
+    # A fixed width wider than the terminal wraps, and the \r erase then
+    # clears only one of the two rows.
+    assert _interim_width() == 39
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -4024,6 +4071,7 @@ Create `meetscribe/transcript.py`:
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import threading
 from datetime import datetime, timezone
@@ -4035,7 +4083,17 @@ LABELS = {MIC: "You", SYSTEM: "Them"}
 COLORS = {MIC: "\033[36m", SYSTEM: "\033[33m"}
 DIM = "\033[2m"
 RESET = "\033[0m"
-INTERIM_MAX_WIDTH = 160
+
+
+def _interim_width() -> int:
+    """Columns the interim line may occupy.
+
+    Derived from the real terminal, not a fixed maximum: a line wider than
+    the terminal wraps, and the \\r erase only clears the row the cursor is
+    on - leaving the wrapped remainder on screen for the rest of the meeting.
+    One column is left spare so writing the last cell cannot wrap.
+    """
+    return max(1, shutil.get_terminal_size((80, 24)).columns - 1)
 
 
 def hhmmss(seconds: float) -> str:
@@ -4088,7 +4146,7 @@ class TranscriptWriter:
                 if self.show_interim:
                     self._clear_interim()
                     line = f"{hhmmss(segment.t_start)} {label}: {segment.text}"
-                    line = line[:INTERIM_MAX_WIDTH]
+                    line = line[: _interim_width()]
                     sys.stdout.write(f"{DIM}{line}{RESET}" if self.color else line)
                     sys.stdout.flush()
                     self._interim_width = len(line)
@@ -4128,7 +4186,7 @@ class TranscriptWriter:
 
 Run: `uv run pytest tests/test_transcript.py -v`
 
-Expected: PASS, 9 passed.
+Expected: PASS, 13 passed.
 
 - [ ] **Step 5: Commit**
 
