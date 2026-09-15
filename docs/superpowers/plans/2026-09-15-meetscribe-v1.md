@@ -3649,7 +3649,13 @@ The one piece that opens a connection. It is thin by design: build the config, f
 Append to `tests/test_google.py`:
 
 ```python
-from meetscribe.google import GoogleConfig, recognizer_path, speech_endpoint
+from meetscribe.google import (
+    STREAM_TIMEOUT_S,
+    GoogleConfig,
+    GoogleSpeechSession,
+    recognizer_path,
+    speech_endpoint,
+)
 
 
 def test_regional_endpoint():
@@ -3674,6 +3680,55 @@ def test_config_defaults_match_the_spec():
     assert config.model == "chirp_3"
     assert config.language_codes == ("en-US",)
     assert config.interim is True
+
+
+class RecordingClient:
+    """Drains the request generator so we can inspect what was sent."""
+
+    def __init__(self):
+        self.received = None
+
+    def streaming_recognize(self, requests, timeout=None):
+        self.received = list(requests)
+        self.timeout = timeout
+        return []
+
+
+def test_stream_sends_config_first_then_one_request_per_block():
+    client = RecordingClient()
+    session = GoogleSpeechSession(
+        GoogleConfig(
+            project_id="p", phrases=("Kubernetes",), language_codes=("uk-UA", "en-US")
+        ),
+        client,
+        StreamClock(),
+        "mic",
+    )
+
+    list(session.stream(iter([b"chunk1", b"chunk2"])))
+
+    config = client.received[0].streaming_config.config
+    assert client.received[0].recognizer == "projects/p/locations/eu/recognizers/_"
+    assert list(config.language_codes) == ["uk-UA", "en-US"]
+    assert config.features.enable_word_time_offsets is True
+    assert (
+        config.adaptation.phrase_sets[0].inline_phrase_set.phrases[0].value
+        == "Kubernetes"
+    )
+    # Audio follows the config, one request per block, in order.
+    assert [r.audio for r in client.received[1:]] == [b"chunk1", b"chunk2"]
+
+
+def test_stream_bounds_the_call_with_a_timeout():
+    client = RecordingClient()
+    session = GoogleSpeechSession(
+        GoogleConfig(project_id="p"), client, StreamClock(), "mic"
+    )
+
+    list(session.stream(iter([b"x"])))
+
+    # Without this a black-holed connection stalls the track silently.
+    assert client.timeout == STREAM_TIMEOUT_S
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -3688,9 +3743,16 @@ Append to `meetscribe/google.py`:
 
 ```python
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .types import TARGET_RATE
+
+# Healthy streams are rotated at MAX_STREAM_SECONDS. A stream still open well
+# past that is stalled - gRPC sets no deadline and no keepalive, so a
+# black-holed connection would otherwise leave this track silently
+# transcribing nothing for the rest of the meeting. DeadlineExceeded is not
+# fatal, so EngineWorker reconnects.
+STREAM_TIMEOUT_S = MAX_STREAM_SECONDS + 30
 
 
 def speech_endpoint(region: str) -> str:
@@ -3732,6 +3794,9 @@ class GoogleSpeechSession:
                     cs.SpeechAdaptation.AdaptationPhraseSet(
                         inline_phrase_set=cs.PhraseSet(
                             phrases=[
+                                # 0-20, where high values start degrading
+                                # general accuracy. 15 is aggressive enough
+                                # for names and jargon without that trade-off.
                                 cs.PhraseSet.Phrase(value=p, boost=15.0)
                                 for p in self._config.phrases
                             ]
@@ -3774,7 +3839,9 @@ class GoogleSpeechSession:
             for block in pcm:
                 yield cs.StreamingRecognizeRequest(audio=block)
 
-        for response in self._client.streaming_recognize(requests=requests()):
+        for response in self._client.streaming_recognize(
+            requests=requests(), timeout=STREAM_TIMEOUT_S
+        ):
             for result in response.results:
                 segment = segment_from_result(result, self._clock, self._track)
                 if segment is not None:
@@ -3812,7 +3879,7 @@ Merge the new imports into the module's existing import block.
 
 Run: `uv run pytest tests/test_google.py -v`
 
-Expected: PASS, 20 passed.
+Expected: PASS, 22 passed.
 
 - [ ] **Step 5: Commit**
 
