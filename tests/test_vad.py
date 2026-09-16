@@ -2,12 +2,7 @@ import random
 import struct
 
 from meetscribe.types import BLOCK_BYTES
-from meetscribe.vad import (
-    KEEPALIVE_EVERY_BLOCKS,
-    SILENCE_TAIL_BLOCKS,
-    SilenceGate,
-    webrtc_detector,
-)
+from meetscribe.vad import SILENCE_TAIL_BLOCKS, SilenceGate, webrtc_detector
 
 SPEECH = b"\x01" * BLOCK_BYTES
 QUIET = b"\x00" * BLOCK_BYTES
@@ -40,23 +35,6 @@ def test_passes_a_silence_tail_then_stops():
     # paying to transmit dead air.
     assert passed[:SILENCE_TAIL_BLOCKS] == [True] * SILENCE_TAIL_BLOCKS
     assert passed[SILENCE_TAIL_BLOCKS:] == [False, False, False]
-
-
-def test_a_keepalive_block_survives_a_long_silence():
-    # Seen live: a tapped application went quiet, the gate sent nothing, and
-    # Google ended the stream with "409 Stream timed out after receiving no
-    # more client requests". One block through periodically prevents that.
-    gate = SilenceGate(detector=detector)
-    gate.allows(SPEECH)
-
-    passed = [gate.allows(QUIET) for _ in range(3 * KEEPALIVE_EVERY_BLOCKS)]
-    allowed_at = [i for i, ok in enumerate(passed, start=1) if ok]
-
-    assert allowed_at == list(range(1, SILENCE_TAIL_BLOCKS + 1)) + [
-        KEEPALIVE_EVERY_BLOCKS,
-        KEEPALIVE_EVERY_BLOCKS * 2,
-        KEEPALIVE_EVERY_BLOCKS * 3,
-    ]
 
 
 def test_tail_resets_when_speech_resumes():

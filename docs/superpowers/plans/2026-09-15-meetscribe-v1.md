@@ -1234,9 +1234,11 @@ def test_passes_a_silence_tail_then_stops():
     assert passed[SILENCE_TAIL_BLOCKS:] == [False, False, False]
 
 
-# Added after the first live run: with only the tail above, a quiet application
-# means nothing is sent at all and Google ends the stream with "409 Stream timed
-# out after receiving no more client requests". See KEEPALIVE_EVERY_BLOCKS.
+# Added after the live runs: past this tail nothing is sent, and Google ends a
+# stream it receives nothing on ("409 Stream timed out after receiving no more
+# client requests"). The keepalive that prevents that is NOT here - it is in
+# EngineWorker.blocks(), because the audio can also stop upstream of the gate
+# entirely. See google.py:KEEPALIVE_S.
 
 
 def test_tail_resets_when_speech_resumes():
@@ -1317,7 +1319,6 @@ log = logging.getLogger(__name__)
 FRAME_MS = 20
 FRAME_BYTES = TARGET_RATE * 2 * FRAME_MS // 1000
 SILENCE_TAIL_BLOCKS = 5
-KEEPALIVE_EVERY_BLOCKS = 20  # added after the first live run; see above
 
 SpeechDetector = Callable[[bytes], bool]
 
