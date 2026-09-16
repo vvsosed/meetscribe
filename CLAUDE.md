@@ -15,7 +15,7 @@ separation for free — no diarization model needed.
 `tap`, `capture`, `adapters`, `google`, `transcript`, `cli` and `__main__`, wired together in
 `cli.py`.
 
-`tests/` holds 145 tests that run with no audio hardware, no network and no credentials —
+`tests/` holds 146 tests that run with no audio hardware, no network and no credentials —
 every subprocess, socket and clock the package touches sits behind a `Protocol` in
 `ports.py`, with a real implementation in `adapters.py`/`google.py` and a fake in
 `tests/conftest.py`.
@@ -59,7 +59,7 @@ pw-cli --version                   # needs >= 0.3.60
 pw-dump | head                     # graph as JSON
 pw-record --target=0 /tmp/t.wav    # Ctrl-C, then play it back
 
-uv run pytest                                              # 145 tests, no audio/network/creds needed
+uv run pytest                                              # 146 tests, no audio/network/creds needed
 uv run meetscribe devices                                  # run this MID-CALL
 uv run meetscribe run --app zoom --lang uk-UA --lang en-US
 uv run python -m meetscribe --help
