@@ -15,7 +15,7 @@ separation for free — no diarization model needed.
 `tap`, `capture`, `adapters`, `google`, `transcript`, `cli` and `__main__`, wired together in
 `cli.py`.
 
-`tests/` holds 147 tests that run with no audio hardware, no network and no credentials —
+`tests/` holds 149 tests that run with no audio hardware, no network and no credentials —
 every subprocess, socket and clock the package touches sits behind a `Protocol` in
 `ports.py`, with a real implementation in `adapters.py`/`google.py` and a fake in
 `tests/conftest.py`.
@@ -34,10 +34,13 @@ spike found and prove out the PipeWire approach. It has its own `pyproject.toml`
 The `pyproject.toml` and `uv.lock` at the repository root belong to the real `meetscribe`
 package, not to `docs/initial_research/`.
 
-`tests/fixtures/pw_dump_real.json` is **not yet captured.** A schema-regression test against
-a real, scrubbed `pw-dump` capture is still outstanding — capturing and scrubbing one (it
-would contain a username, hostname, device serials and pids) is the repository owner's job,
-not an agent's.
+`tests/fixtures/pw_dump_real.json` is a **real `pw-dump`, scrubbed** — every other fixture
+in `tests/fixtures/` was hand-written from the same assumptions `graph.py` was written from,
+so they cannot catch a wrong assumption; they share it. This one can. It was captured with
+an application streaming audio, so it covers the `Stream/Output/Audio` case `--app` depends
+on, and it is regenerated with `scripts/scrub_pw_dump.py` (read its docstring first — a raw
+dump carries a username, hostname, machine-id, pids and device serial numbers, and git
+history is forever). `test_the_real_fixture_carries_no_identifying_data` guards the scrub.
 
 ## Commands
 
@@ -59,7 +62,7 @@ pw-cli --version                   # needs >= 0.3.60
 pw-dump | head                     # graph as JSON
 pw-record --target=0 /tmp/t.wav    # Ctrl-C, then play it back
 
-uv run pytest                                              # 147 tests, no audio/network/creds needed
+uv run pytest                                              # 149 tests, no audio/network/creds needed
 uv run meetscribe devices                                  # run this MID-CALL
 uv run meetscribe run --app zoom --lang uk-UA --lang en-US
 uv run python -m meetscribe --help
