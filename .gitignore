@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# meetscribe writes call transcripts here by default (--out); never commit them.
+transcripts/

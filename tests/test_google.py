@@ -373,10 +373,14 @@ def test_timestamps_survive_gated_silence():
 
         def stream(self, pcm):
             sent = 0
-            for _ in pcm:
+            speech = 0
+            for block in pcm:
                 sent += 1
-                if sent == 7:  # one word, the five-block tail, the sentence
-                    stop.set()
+                if block == PCM:
+                    speech += 1
+                    if speech == 2:  # the sentence, after the long silence
+                        stop.set()
+                        break
             result = SimpleNamespace(
                 alternatives=[
                     SimpleNamespace(transcript="hello", confidence=0.9, words=[])
@@ -464,7 +468,9 @@ def test_stream_sends_config_first_then_one_request_per_block():
     config = client.received[0].streaming_config.config
     assert client.received[0].recognizer == "projects/p/locations/eu/recognizers/_"
     assert list(config.language_codes) == ["uk-UA", "en-US"]
-    assert config.features.enable_word_time_offsets is True
+    # Chirp 3 rejects word timestamps in streaming mode with a fatal
+    # InvalidArgument, so the request must not ask for them.
+    assert config.features.enable_word_time_offsets is False
     assert (
         config.adaptation.phrase_sets[0].inline_phrase_set.phrases[0].value
         == "Kubernetes"

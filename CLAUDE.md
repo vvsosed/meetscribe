@@ -15,7 +15,7 @@ separation for free — no diarization model needed.
 `tap`, `capture`, `adapters`, `google`, `transcript`, `cli` and `__main__`, wired together in
 `cli.py`.
 
-`tests/` holds 145 tests that run with no audio hardware, no network and no credentials —
+`tests/` holds 146 tests that run with no audio hardware, no network and no credentials —
 every subprocess, socket and clock the package touches sits behind a `Protocol` in
 `ports.py`, with a real implementation in `adapters.py`/`google.py` and a fake in
 `tests/conftest.py`.
@@ -59,7 +59,7 @@ pw-cli --version                   # needs >= 0.3.60
 pw-dump | head                     # graph as JSON
 pw-record --target=0 /tmp/t.wav    # Ctrl-C, then play it back
 
-uv run pytest                                              # 145 tests, no audio/network/creds needed
+uv run pytest                                              # 146 tests, no audio/network/creds needed
 uv run meetscribe devices                                  # run this MID-CALL
 uv run meetscribe run --app zoom --lang uk-UA --lang en-US
 uv run python -m meetscribe --help
@@ -97,7 +97,8 @@ shared `Queue[Segment]` that `TranscriptWriter` is the single consumer of:
 - `graph.py` — parses `pw-dump` text into a `PwGraph`. Pure; never runs a subprocess.
 - `rotation.py` — `StreamClock` for rotation offsets, `AudioTimeline` for mapping sent-audio
   positions back to capture times.
-- `vad.py` — `SilenceGate`, dropping silence but keeping a tail so utterances finalise.
+- `vad.py` — `SilenceGate`, dropping silence but keeping a tail so utterances finalise
+  and a keepalive so a quiet stretch does not kill the stream.
 - `recorder.py` — builds the `pw-record` argv and frames its stdout into fixed blocks.
 - `tap.py` — `AppTap`, linking a matching application's ports into the capture node and
   re-scanning every 2 s.
@@ -150,13 +151,22 @@ shared `Queue[Segment]` that `TranscriptWriter` is the single consumer of:
   240 s; `EngineWorker.run` (`google.py`) tears the stream down and reopens at that mark,
   carrying `StreamClock.offset` forward so timestamps stay continuous. Without the rotation,
   transcription silently stops mid-meeting.
+- **Chirp 3 rejects word timestamps in streaming mode.** `enable_word_time_offsets`
+  is only valid in `Recognize`/`BatchRecognize`; setting it on a streaming request
+  is a fatal `InvalidArgument` that ends the run before anything is transcribed.
+  So `Segment.words` is always empty in practice, and `segment_from_result` stamps
+  each final at its end offset rather than its first word's start.
 - **Chirp 3 does not diarize in streaming mode** (only `Recognize`/`BatchRecognize`), and
   this package does not lean on it to separate speakers anyway: capturing mic and system
   audio as two independent tracks (`MIC`/`SYSTEM` in `types.py`) is what gives You/Them
   separation, with its own `SilenceGate` and engine worker per track.
 - **VAD gating** drops silence to cut API cost, but `SilenceGate.allows` (`vad.py`)
   deliberately lets `SILENCE_TAIL_BLOCKS` (5) silent blocks through after speech so the
-  engine can finalise the utterance.
+  engine can finalise the utterance, and then one block every
+  `KEEPALIVE_EVERY_BLOCKS` (20, i.e. 2 s) for as long as the silence lasts. Without
+  that keepalive Google ends a stream it is receiving nothing on —
+  `409 Stream timed out after receiving no more client requests`, seen live the moment
+  the tapped application went quiet. It cost a run seven reconnects and 90 s of backoff.
 
 ## Things that bite at runtime
 
