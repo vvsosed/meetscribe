@@ -77,12 +77,16 @@ Check: in the resulting `.md`, that sentence should be stamped near
 
 Check, in the same run: the log stays quiet through those three minutes. A
 `409 Stream timed out after receiving no more client requests`, or any
-reconnect at all while nothing is being said, means the silence keepalive
-has regressed — past the finalisation tail the gate must still let one
-block through every `KEEPALIVE_EVERY_BLOCKS` (`meetscribe/vad.py`), because
-Google ends a stream it is receiving nothing on. This is how that bug was
-found: seven reconnects and ~90 s of backoff the moment the tapped
-application went quiet.
+reconnect at all while nothing is being said, means the keepalive in
+`EngineWorker.blocks()` (`meetscribe/google.py`) has regressed.
+
+Then do the harder half, which is a *different* failure with the same error:
+with `--app`, **stop the audio at the source** — end the video, or close the
+tab — and leave the run going for a minute. That unlinks the capture node, and
+PipeWire emits nothing at all rather than silence, so no block reaches the gate
+and a gate-level keepalive cannot save it. This is how that bug shipped twice:
+the first fix only covered the quiet-but-still-flowing case above, and the
+smoke test only exercised that one.
 
 Why this matters: the silence gate drops quiet audio blocks before they are
 ever sent to Google, so the engine's own result offsets only count the audio

@@ -13,7 +13,7 @@ from google.api_core import exceptions as gexc
 
 from .ports import Clock, SpeechSession
 from .rotation import MAX_STREAM_SECONDS, AudioTimeline, StreamClock
-from .types import BLOCK_MS, TARGET_RATE, Segment, Word
+from .types import BLOCK_BYTES, BLOCK_MS, TARGET_RATE, Segment, Word
 from .vad import SilenceGate
 
 log = logging.getLogger(__name__)
@@ -28,6 +28,21 @@ ESCALATE_AFTER_FAILURES = 5
 # transcribing nothing for the rest of the meeting. DeadlineExceeded is not
 # fatal, so EngineWorker reconnects.
 STREAM_TIMEOUT_S = MAX_STREAM_SECONDS + 30
+
+# Google ends a stream it stops receiving requests on, with a 409 "Stream timed
+# out after receiving no more client requests". Two different things stop the
+# requests, and both were seen live:
+#
+#   - the gate drops a quiet stretch, so nothing is worth sending; and
+#   - blocks stop arriving at all, because the tapped application's node went
+#     away. A finished video or a closed tab unlinks the capture node, and
+#     PipeWire does not drive a stream with no input - pw-record then emits
+#     nothing whatsoever, not silence.
+#
+# So the keepalive has to sit here, where the audio actually stops, rather than
+# in SilenceGate, which only ever sees blocks that did arrive.
+KEEPALIVE_S = 2.0
+SILENCE_BLOCK = b"\x00" * BLOCK_BYTES
 
 # Retrying any of these is pointless: the configuration or the credentials are
 # wrong and will stay wrong.
@@ -143,18 +158,34 @@ class EngineWorker:
 
             def blocks() -> Iterator[bytes]:
                 nonlocal last_chunk_t
+                # The stream starts at the offset, so that is the capture time
+                # `started` corresponds to; keepalives are timed from there
+                # until a real chunk gives us a better anchor.
+                last_chunk_at = started
+                last_sent_at = started
                 while not stop.is_set():
-                    if stream_clock.should_rotate(self._clock.monotonic() - started):
+                    now = self._clock.monotonic()
+                    if stream_clock.should_rotate(now - started):
                         log.debug("rotating %s stream", self._track)
                         return
                     try:
                         chunk = audio_q.get(timeout=0.25)
                     except queue_module.Empty:
-                        continue
-                    last_chunk_t = chunk.t_start
-                    if self._gate.allows(chunk.pcm):
+                        chunk = None
+                    now = self._clock.monotonic()
+                    if chunk is not None:
+                        last_chunk_t = chunk.t_start
+                        last_chunk_at = now
+                    if chunk is not None and self._gate.allows(chunk.pcm):
+                        last_sent_at = now
                         timeline.sent(chunk.t_start)
                         yield chunk.pcm
+                    elif now - last_sent_at >= KEEPALIVE_S:
+                        # Nothing worth sending, or nothing arriving at all.
+                        # Either way the stream dies unless we say something.
+                        last_sent_at = now
+                        timeline.sent(last_chunk_t + (now - last_chunk_at))
+                        yield SILENCE_BLOCK
 
             try:
                 # No stop check inside this loop. blocks() already returns

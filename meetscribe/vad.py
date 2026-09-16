@@ -17,11 +17,6 @@ log = logging.getLogger(__name__)
 FRAME_MS = 20
 FRAME_BYTES = TARGET_RATE * 2 * FRAME_MS // 1000
 SILENCE_TAIL_BLOCKS = 5
-# Google closes a stream it stops receiving requests on entirely: "409 Stream
-# timed out after receiving no more client requests", seen live when a tapped
-# application went quiet. One block every two seconds keeps the stream alive
-# and is still ~95% cheaper than streaming the silence.
-KEEPALIVE_EVERY_BLOCKS = 20
 
 SpeechDetector = Callable[[bytes], bool]
 
@@ -63,11 +58,9 @@ class SilenceGate:
         self,
         detector: SpeechDetector | None,
         tail_blocks: int = SILENCE_TAIL_BLOCKS,
-        keepalive_every: int = KEEPALIVE_EVERY_BLOCKS,
     ):
         self._detect = detector
         self._tail_blocks = tail_blocks
-        self._keepalive_every = keepalive_every
         self._silence_run = 0
 
     def allows(self, pcm: bytes) -> bool:
@@ -77,9 +70,8 @@ class SilenceGate:
             self._silence_run = 0
             return True
         self._silence_run += 1
-        if self._silence_run <= self._tail_blocks:
-            return True
-        # Past the finalisation tail we would send nothing at all, and Google
-        # ends a stream that receives no requests. Let one block through
-        # periodically so a quiet stretch does not kill the stream.
-        return self._silence_run % self._keepalive_every == 0
+        # Past the tail we send nothing. Keeping the stream alive through the
+        # silence is EngineWorker's job (google.py:KEEPALIVE_S), not the
+        # gate's - blocks stop arriving entirely when the tapped node goes
+        # away, and the gate never sees that.
+        return self._silence_run <= self._tail_blocks

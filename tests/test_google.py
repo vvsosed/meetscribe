@@ -114,9 +114,9 @@ import threading
 
 from google.api_core import exceptions as gexc
 
-from meetscribe.google import EngineWorker
-from meetscribe.types import BLOCK_BYTES, AudioChunk, Segment
-from meetscribe.vad import SilenceGate
+from meetscribe.google import KEEPALIVE_S, SILENCE_BLOCK, EngineWorker
+from meetscribe.types import BLOCK_BYTES, BLOCK_MS, AudioChunk, Segment
+from meetscribe.vad import SILENCE_TAIL_BLOCKS, SilenceGate
 from tests.conftest import FakeClock
 
 PCM = b"\x01" * BLOCK_BYTES
@@ -218,6 +218,105 @@ def test_silence_gate_filters_blocks_before_they_are_sent():
 
     # One speech block plus the five-block finalisation tail, nothing more.
     assert len(sessions[0].consumed) == 6
+
+
+class DeadQueue:
+    """The tapped application went away, so no block ever arrives again.
+
+    A real ``queue.get(timeout=0.25)`` burns a quarter second per poll, so the
+    fake clock has to move the same way or nothing time-based in the worker
+    can ever fire.
+    """
+
+    def __init__(self, clock, stop, stop_after_polls):
+        self._clock = clock
+        self._stop = stop
+        self._polls = 0
+        self._stop_after = stop_after_polls
+
+    def get(self, timeout=None):
+        self._polls += 1
+        self._clock.advance(timeout or 0.25)
+        if self._polls >= self._stop_after:
+            self._stop.set()
+        raise queue.Empty
+
+
+class TickingQueue:
+    """Hands out chunks and advances the clock one block per get, like audio."""
+
+    def __init__(self, clock, stop, chunks):
+        self._clock = clock
+        self._stop = stop
+        self._chunks = list(chunks)
+
+    def get(self, timeout=None):
+        self._clock.advance(BLOCK_MS / 1000)
+        if not self._chunks:
+            self._stop.set()
+            raise queue.Empty
+        return self._chunks.pop(0)
+
+
+def test_keeps_the_stream_alive_when_the_audio_source_disappears():
+    # Seen live, twice: a YouTube video ended, Firefox tore its stream node
+    # down, and the capture node was left with nothing linked into it.
+    # PipeWire does not drive a stream with no input, so pw-record emits
+    # nothing whatsoever - not silence, nothing - and the queue simply stays
+    # empty. Google then ends the stream: "409 Stream timed out after
+    # receiving no more client requests".
+    stop = threading.Event()
+    clock = FakeClock()
+    sessions = []
+
+    def factory(timeline):
+        session = ScriptedSession(timeline)
+        sessions.append(session)
+        return session
+
+    EngineWorker(
+        track="system",
+        session_factory=factory,
+        gate=SilenceGate(detector=None),
+        clock=clock,
+    ).run(DeadQueue(clock, stop, stop_after_polls=40), queue.Queue(), stop)
+
+    # Ten seconds of nothing at all; one keepalive every KEEPALIVE_S.
+    assert sessions[0].consumed == [SILENCE_BLOCK] * int(10 / KEEPALIVE_S)
+
+
+def test_keeps_the_stream_alive_through_gated_silence():
+    # The other way the requests stop: blocks do arrive, but the gate drops
+    # them all. Same 409.
+    stop = threading.Event()
+    clock = FakeClock()
+    room_tone = b"\x02" * BLOCK_BYTES  # quiet, but not digital silence
+    sessions = []
+
+    def factory(timeline):
+        session = ScriptedSession(timeline)
+        sessions.append(session)
+        return session
+
+    chunks = [AudioChunk(track="system", pcm=PCM, t_start=0.0)]
+    chunks += [
+        AudioChunk(track="system", pcm=room_tone, t_start=(i + 1) * 0.1)
+        for i in range(100)
+    ]
+
+    EngineWorker(
+        track="system",
+        session_factory=factory,
+        gate=SilenceGate(detector=lambda pcm: pcm == PCM),
+        clock=clock,
+    ).run(TickingQueue(clock, stop, chunks), queue.Queue(), stop)
+
+    consumed = sessions[0].consumed
+    # The speech, then the finalisation tail of real audio, then synthetic
+    # keepalives - never a silent stream.
+    assert consumed[:6] == [PCM] + [room_tone] * SILENCE_TAIL_BLOCKS
+    assert consumed[6:] == [SILENCE_BLOCK] * 4
+    assert set(consumed[6:]) == {SILENCE_BLOCK}
 
 
 def test_rotates_and_carries_the_offset_forward():

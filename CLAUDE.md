@@ -15,7 +15,7 @@ separation for free — no diarization model needed.
 `tap`, `capture`, `adapters`, `google`, `transcript`, `cli` and `__main__`, wired together in
 `cli.py`.
 
-`tests/` holds 146 tests that run with no audio hardware, no network and no credentials —
+`tests/` holds 147 tests that run with no audio hardware, no network and no credentials —
 every subprocess, socket and clock the package touches sits behind a `Protocol` in
 `ports.py`, with a real implementation in `adapters.py`/`google.py` and a fake in
 `tests/conftest.py`.
@@ -59,7 +59,7 @@ pw-cli --version                   # needs >= 0.3.60
 pw-dump | head                     # graph as JSON
 pw-record --target=0 /tmp/t.wav    # Ctrl-C, then play it back
 
-uv run pytest                                              # 146 tests, no audio/network/creds needed
+uv run pytest                                              # 147 tests, no audio/network/creds needed
 uv run meetscribe devices                                  # run this MID-CALL
 uv run meetscribe run --app zoom --lang uk-UA --lang en-US
 uv run python -m meetscribe --help
@@ -97,16 +97,15 @@ shared `Queue[Segment]` that `TranscriptWriter` is the single consumer of:
 - `graph.py` — parses `pw-dump` text into a `PwGraph`. Pure; never runs a subprocess.
 - `rotation.py` — `StreamClock` for rotation offsets, `AudioTimeline` for mapping sent-audio
   positions back to capture times.
-- `vad.py` — `SilenceGate`, dropping silence but keeping a tail so utterances finalise
-  and a keepalive so a quiet stretch does not kill the stream.
+- `vad.py` — `SilenceGate`, dropping silence but keeping a tail so utterances finalise.
 - `recorder.py` — builds the `pw-record` argv and frames its stdout into fixed blocks.
 - `tap.py` — `AppTap`, linking a matching application's ports into the capture node and
   re-scanning every 2 s.
 - `capture.py` — `plan_recorders` decides what to record; `PipeWireCapture` owns the
   recorders, queues and threads.
 - `adapters.py` — the real ports. **The only module that starts a subprocess.**
-- `google.py` — result mapping, the retryable/fatal split, `EngineWorker`'s rotation and
-  retry loop, and the Chirp 3 session.
+- `google.py` — result mapping, the retryable/fatal split, `EngineWorker`'s rotation,
+  keepalive and retry loop, and the Chirp 3 session.
 - `transcript.py` — the live console line, the append-only JSONL, and the Markdown rendered
   at close.
 - `cli.py` / `__main__.py` — argparse, wiring, signals, shutdown.
@@ -162,11 +161,21 @@ shared `Queue[Segment]` that `TranscriptWriter` is the single consumer of:
   separation, with its own `SilenceGate` and engine worker per track.
 - **VAD gating** drops silence to cut API cost, but `SilenceGate.allows` (`vad.py`)
   deliberately lets `SILENCE_TAIL_BLOCKS` (5) silent blocks through after speech so the
-  engine can finalise the utterance, and then one block every
-  `KEEPALIVE_EVERY_BLOCKS` (20, i.e. 2 s) for as long as the silence lasts. Without
-  that keepalive Google ends a stream it is receiving nothing on —
-  `409 Stream timed out after receiving no more client requests`, seen live the moment
-  the tapped application went quiet. It cost a run seven reconnects and 90 s of backoff.
+  engine can finalise the utterance.
+- **A stream that is sent nothing gets killed**, with a `409 Stream timed out after
+  receiving no more client requests`. Two unrelated things stop the requests, and both
+  were hit live:
+  - the gate drops a quiet stretch, so nothing is worth sending; and
+  - blocks stop arriving *at all*, because the tapped application's node went away — a
+    finished video, a closed tab. The capture node is then left unlinked, and **PipeWire
+    does not drive a stream with no input: `pw-record` emits nothing whatsoever, not
+    silence** (measured: 0 bytes in 3 s unlinked, 92788 autoconnected).
+
+  So the keepalive lives in `EngineWorker.blocks()` (`google.py`), which is where the
+  audio actually stops, and **not** in `SilenceGate`, which only ever sees blocks that
+  did arrive. It sends one `SILENCE_BLOCK` whenever `KEEPALIVE_S` (2 s) has passed with
+  nothing sent, covering both causes with one timer. Keep it that way: a gate-level
+  keepalive looks equivalent and silently fails the second case.
 
 ## Things that bite at runtime
 
