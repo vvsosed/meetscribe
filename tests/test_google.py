@@ -373,10 +373,14 @@ def test_timestamps_survive_gated_silence():
 
         def stream(self, pcm):
             sent = 0
-            for _ in pcm:
+            speech = 0
+            for block in pcm:
                 sent += 1
-                if sent == 7:  # one word, the five-block tail, the sentence
-                    stop.set()
+                if block == PCM:
+                    speech += 1
+                    if speech == 2:  # the sentence, after the long silence
+                        stop.set()
+                        break
             result = SimpleNamespace(
                 alternatives=[
                     SimpleNamespace(transcript="hello", confidence=0.9, words=[])

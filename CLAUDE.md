@@ -97,7 +97,8 @@ shared `Queue[Segment]` that `TranscriptWriter` is the single consumer of:
 - `graph.py` — parses `pw-dump` text into a `PwGraph`. Pure; never runs a subprocess.
 - `rotation.py` — `StreamClock` for rotation offsets, `AudioTimeline` for mapping sent-audio
   positions back to capture times.
-- `vad.py` — `SilenceGate`, dropping silence but keeping a tail so utterances finalise.
+- `vad.py` — `SilenceGate`, dropping silence but keeping a tail so utterances finalise
+  and a keepalive so a quiet stretch does not kill the stream.
 - `recorder.py` — builds the `pw-record` argv and frames its stdout into fixed blocks.
 - `tap.py` — `AppTap`, linking a matching application's ports into the capture node and
   re-scanning every 2 s.
@@ -161,7 +162,11 @@ shared `Queue[Segment]` that `TranscriptWriter` is the single consumer of:
   separation, with its own `SilenceGate` and engine worker per track.
 - **VAD gating** drops silence to cut API cost, but `SilenceGate.allows` (`vad.py`)
   deliberately lets `SILENCE_TAIL_BLOCKS` (5) silent blocks through after speech so the
-  engine can finalise the utterance.
+  engine can finalise the utterance, and then one block every
+  `KEEPALIVE_EVERY_BLOCKS` (20, i.e. 2 s) for as long as the silence lasts. Without
+  that keepalive Google ends a stream it is receiving nothing on —
+  `409 Stream timed out after receiving no more client requests`, seen live the moment
+  the tapped application went quiet. It cost a run seven reconnects and 90 s of backoff.
 
 ## Things that bite at runtime
 

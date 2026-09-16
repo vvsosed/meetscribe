@@ -227,7 +227,8 @@ losing it is a red suite rather than a silent regression found mid-meeting.
 | Links are additive and deduped | same snapshot twice yields one `link()` call; `ALREADY_LINKED` is not an error |
 | Google's 5-minute cap | `StreamClock` rotated three times; timestamps monotonic and gap-free |
 | Gated silence must not shift the timeline | a worker driven with a gating `SilenceGate` and an engine that numbers results from the audio it received |
-| VAD keeps a silence tail so finals land | speech then silence: exactly 5 silent blocks pass, then none |
+| VAD keeps a silence tail so finals land | speech then silence: exactly 5 silent blocks pass, then none until the keepalive |
+| VAD keeps the stream alive through silence | sustained silence: a block passes every 20th block, or Google 409s the stream |
 | JSONL survives an unclean exit | write finals, skip `close()`, assert the file is complete |
 | Pipe `read()` can return short | fake process emits short reads; chunks still exactly `BLOCK_BYTES` |
 | PipeWire >= 0.3.60 for `target.object` and `stream.capture.sink` | startup check warns and continues |
