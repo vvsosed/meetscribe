@@ -464,7 +464,9 @@ def test_stream_sends_config_first_then_one_request_per_block():
     config = client.received[0].streaming_config.config
     assert client.received[0].recognizer == "projects/p/locations/eu/recognizers/_"
     assert list(config.language_codes) == ["uk-UA", "en-US"]
-    assert config.features.enable_word_time_offsets is True
+    # Chirp 3 rejects word timestamps in streaming mode with a fatal
+    # InvalidArgument, so the request must not ask for them.
+    assert config.features.enable_word_time_offsets is False
     assert (
         config.adaptation.phrase_sets[0].inline_phrase_set.phrases[0].value
         == "Kubernetes"

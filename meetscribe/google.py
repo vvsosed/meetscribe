@@ -263,9 +263,14 @@ class GoogleSpeechSession:
             ),
             language_codes=list(self._config.language_codes),
             model=self._config.model,
+            # No enable_word_time_offsets: Chirp 3 rejects it outright in
+            # streaming mode ("only supports word timestamps in Recognize and
+            # BatchRecognize requests"), which is a fatal InvalidArgument that
+            # ends the run before a single word is transcribed. Segments
+            # therefore carry no per-word timings, and segment_from_result
+            # falls back to stamping them at the utterance's end offset.
             features=cs.RecognitionFeatures(
                 enable_automatic_punctuation=True,
-                enable_word_time_offsets=True,
             ),
             **({"adaptation": adaptation} if adaptation else {}),
         )

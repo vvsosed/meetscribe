@@ -150,6 +150,11 @@ shared `Queue[Segment]` that `TranscriptWriter` is the single consumer of:
   240 s; `EngineWorker.run` (`google.py`) tears the stream down and reopens at that mark,
   carrying `StreamClock.offset` forward so timestamps stay continuous. Without the rotation,
   transcription silently stops mid-meeting.
+- **Chirp 3 rejects word timestamps in streaming mode.** `enable_word_time_offsets`
+  is only valid in `Recognize`/`BatchRecognize`; setting it on a streaming request
+  is a fatal `InvalidArgument` that ends the run before anything is transcribed.
+  So `Segment.words` is always empty in practice, and `segment_from_result` stamps
+  each final at its end offset rather than its first word's start.
 - **Chirp 3 does not diarize in streaming mode** (only `Recognize`/`BatchRecognize`), and
   this package does not lean on it to separate speakers anyway: capturing mic and system
   audio as two independent tracks (`MIC`/`SYSTEM` in `types.py`) is what gives You/Them

@@ -3715,7 +3715,7 @@ def test_stream_sends_config_first_then_one_request_per_block():
     config = client.received[0].streaming_config.config
     assert client.received[0].recognizer == "projects/p/locations/eu/recognizers/_"
     assert list(config.language_codes) == ["uk-UA", "en-US"]
-    assert config.features.enable_word_time_offsets is True
+    assert config.features.enable_word_time_offsets is False
     assert (
         config.adaptation.phrase_sets[0].inline_phrase_set.phrases[0].value
         == "Kubernetes"
@@ -3818,9 +3818,11 @@ class GoogleSpeechSession:
             ),
             language_codes=list(self._config.language_codes),
             model=self._config.model,
+            # No enable_word_time_offsets: Chirp 3 rejects it outright in
+            # streaming mode, which is a fatal InvalidArgument that ends the
+            # run before a single word is transcribed.
             features=cs.RecognitionFeatures(
                 enable_automatic_punctuation=True,
-                enable_word_time_offsets=True,
             ),
             **({"adaptation": adaptation} if adaptation else {}),
         )
