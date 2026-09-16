@@ -101,3 +101,48 @@ def test_empty_dump_yields_an_empty_graph():
     assert graph.ports == ()
     assert graph.default_sink is None
     assert graph.default_source is None
+
+
+def test_parses_a_real_pw_dump():
+    """Guards against pw-dump's schema differing from our hand-written fixtures.
+
+    Every other fixture here was written by hand from the same assumptions the
+    parser was written from, so they cannot catch a wrong assumption - they
+    share it. This one is a real capture (scrubbed: username, hostname,
+    machine-id, pids, device serials and card names are replaced, but every
+    object, key and type is intact), taken with an application streaming audio
+    so the Stream/Output/Audio case is covered too.
+    """
+    graph = parse_graph((FIXTURES / "pw_dump_real.json").read_text())
+
+    assert graph.by_class(SINK), "expected at least one sink"
+    assert graph.by_class(SOURCE), "expected at least one source"
+    assert graph.default_sink is not None
+    assert graph.default_source is not None
+    assert all(n.serial for n in graph.nodes)
+    assert all(p.direction in ("in", "out") for p in graph.ports)
+    # The reason --app works at all: an application's audio stream is a node
+    # with this media.class, and it only exists while the app is playing.
+    assert graph.by_class(PLAYBACK_STREAM), "expected an application stream"
+
+
+def test_the_real_fixture_carries_no_identifying_data():
+    """The fixture is committed to a public repo; a mis-scrub is permanent."""
+    text = (FIXTURES / "pw_dump_real.json").read_text()
+
+    assert "/home/" not in text
+    for key in (
+        "application.process.user",
+        "application.process.host",
+        "application.process.machine-id",
+        "device.serial",
+        "pipewire.sec.pid",
+        "user-name",
+        "host-name",
+    ):
+        for line in text.splitlines():
+            if f'"{key}"' in line:
+                assert any(
+                    token in line
+                    for token in ('"user"', '"host"', "0000", "redacted", ": 1000")
+                ), f"{key} looks unscrubbed: {line.strip()}"
